@@ -17,8 +17,8 @@ import os
 import sqlite3
 from pathlib import Path
 from typing import Iterable, List, Sequence, Tuple, Dict, Any
-import faiss  # 新增：用于高效的向量搜索
-import numpy as np  # 新增：用于数值计算
+import faiss  # 用于高效的向量搜索
+import numpy as np  # 用于数值计算
 
 import requests
 import document_loader
@@ -107,42 +107,55 @@ def chat_completion_stream(messages: List[dict], model_name: str, temperature: f
 def ensure_schema(conn: sqlite3.Connection) -> None:
     conn.execute(
         """
-        CREATE TABLE IF NOT EXISTS documents (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+        -- 元数据表，存储文本块内容和来源，chunk_id 与 FAISS 索引一一对应
+        CREATE TABLE IF NOT EXISTS metadata (
+            chunk_id INTEGER PRIMARY KEY,
             path TEXT NOT NULL,
             chunk_index INTEGER NOT NULL,
-            content TEXT NOT NULL,
-            embedding TEXT NOT NULL
-        )
+            content TEXT NOT NULL
+        );
+        """
+    )
+    conn.execute(
+        """
+        -- 用于快速查找
+        CREATE INDEX IF NOT EXISTS idx_path ON metadata(path);
         """
     )
     conn.commit()
 
-
-def upsert_chunk(
-    conn: sqlite3.Connection,
-    *,
-    path: str,
-    chunk_index: int,
-    content: str,
-    embedding: Sequence[float],
-) -> None:
-    conn.execute(
+def bulk_insert_metadata(conn: sqlite3.Connection, metadata_records: List[Tuple[int, str, int, str]]) -> None:
+    """
+    批量插入元数据，大幅提高写入效率
+    """
+    conn.executemany(
         """
-        INSERT INTO documents (path, chunk_index, content, embedding)
+        INSERT OR REPLACE INTO metadata (chunk_id, path, chunk_index, content)
         VALUES (?, ?, ?, ?)
         """,
-        (path, chunk_index, content, json.dumps(list(embedding))),
+        metadata_records
     )
+    conn.commit()
 
+def get_content_by_chunk_id(conn: sqlite3.Connection, chunk_id: int) -> str:
+    """
+    根据 chunk_id 查询内容
+    """
+    cursor = conn.cursor()
+    cursor.execute("SELECT content FROM metadata WHERE chunk_id = ?", (chunk_id,))
+    result = cursor.fetchone()
+    return result[0] if result else ""
 
-def load_all_chunks(conn: sqlite3.Connection) -> List[Tuple[int, str, int, str, List[float]]]:
-    rows = conn.execute("SELECT id, path, chunk_index, content, embedding FROM documents").fetchall()
-    return [
-        (row[0], row[1], row[2], row[3], json.loads(row[4]))
-        for row in rows
-    ]
-
+def get_metadata_by_chunk_id(conn: sqlite3.Connection, chunk_id: int) -> Dict[str, Any]:
+    """
+    根据 chunk_id 查询完整元数据
+    """
+    cursor = conn.cursor()
+    cursor.execute("SELECT path, chunk_index, content FROM metadata WHERE chunk_id = ?", (chunk_id,))
+    result = cursor.fetchone()
+    if result:
+        return {"path": result[0], "chunk_index": result[1], "content": result[1]}
+    return {}
 
 # ----------------------------- FAISS helpers ----------------------------- #
 def save_faiss_index_and_metadata(vectors: np.ndarray, metadata_list: List[dict]):
@@ -156,8 +169,11 @@ def save_faiss_index_and_metadata(vectors: np.ndarray, metadata_list: List[dict]
     
     faiss.write_index(index, FAISS_INDEX_FILE)
     
+    # 只保存 chunk_id，内容由 SQLite 管理
+    simplified_metadata = [{"chunk_id": m["chunk_id"]} for m in metadata_list]
     with open(METADATA_FILE, 'w', encoding='utf-8') as f:
-        json.dump(metadata_list, f, ensure_ascii=False, indent=2)
+        json.dump(simplified_metadata, f, ensure_ascii=False, indent=2)
+    print(f"[构建] FAISS 索引和元数据文件已保存。")
 
 def load_faiss_index_and_metadata():
     """从磁盘加载 FAISS 索引和元数据"""
@@ -171,7 +187,7 @@ def search_similar_with_faiss(query_vec: List[float], top_k: int = 3, score_thre
     使用 FAISS 进行向量相似度搜索
     """
     try:
-        index, metadata = load_faiss_index_and_metadata()
+        index, metadata_map = load_faiss_index_and_metadata()
     except Exception as e:
         print(f"加载 FAISS 索引失败: {e}。可能需要先构建知识库。")
         return []
@@ -188,113 +204,131 @@ def search_similar_with_faiss(query_vec: List[float], top_k: int = 3, score_thre
         score = scores[0][i]
         # 过滤掉低于阈值的结果
         if score >= score_threshold:
-            meta = metadata[idx]
-            results.append((float(score), meta["content"], meta["path"], meta["chunk_index"]))
-    
+            # 通过 FAISS 返回的索引 idx，找到对应的 chunk_id
+            chunk_id = metadata_map[idx]["chunk_id"]
+            results.append((float(score), chunk_id)) # 返回分数和 chunk_id
     return results
 
 
-# ----------------------------- Text utilities ----------------------------- #
-def cosine_similarity(vec_a: Sequence[float], vec_b: Sequence[float]) -> float:
-    if len(vec_a) != len(vec_b):
-        raise ValueError("向量维度不一致")
-    dot = sum(a * b for a, b in zip(vec_a, vec_b))
-    norm_a = math.sqrt(sum(a * a for a in vec_a))
-    norm_b = math.sqrt(sum(b * b for b in vec_b))
-    if norm_a == 0 or norm_b == 0:
-        return 0.0
-    return dot / (norm_a * norm_b)
-
-
-# ----------------------------- RAG pipeline ----------------------------- #
-def build_knowledge_base(source_dir: Path, chunk_size: int = 400, overlap: int = 50) -> None:
-    # 使用 document_loader 模块批量加载所有支持格式的文档
-    print(f"正在从 '{source_dir}' 加载所有支持的文档...")
+# ----------------------------- RAG pipeline: BUILD PHASE (离线) ----------------------------- #
+def build_knowledge_base_offline(source_dir: Path, chunk_size: int = 400, overlap: int = 50) -> None:
+    """
+    【构建阶段】：离线处理文档，生成向量索引和元数据。
+    此过程不依赖 Ollama 服务。
+    """
+    print(f"[构建] 开始处理来自 '{source_dir}' 的文档...")
     all_docs = document_loader.batch_load_documents(str(source_dir))
     
     if not all_docs:
         raise RuntimeError(f"在目录 {source_dir} 下未找到或加载任何支持的文档")
 
-    # --- 初始化语义感知切块器 ---
-    print("正在初始化语义感知切块器...")
+    print("[构建] 初始化语义感知切块器...")
+    LOCAL_EMBEDDING_MODEL_PATH = "./all-MiniLM-L6-v2"
+
     splitter = text_splitter.SmartTextSplitter(
-        model_name="BAAI/bge-large-zh-v1.5", # 嵌入模型
-        threshold=0.8,                       # 语义相似度阈值
+        model_path=LOCAL_EMBEDDING_MODEL_PATH,
+        model_name="BAAI/bge-large-zh-v1.5",
+        threshold=0.8,
         base_splitter_params={
-            "chunk_size": chunk_size,       # 初始块大小
-            "chunk_overlap": overlap,       # 初始重叠长度
+            "chunk_size": chunk_size,
+            "chunk_overlap": overlap,
             "separators": ["\n\n", "\n", "。", "？", "！", "；", "?", "!", ";", "...", " ", ""],
-        }
+        },
+        load_timeout=15
     )
-    # ----------------------------------
 
-    conn = sqlite3.connect(DB_PATH)
-    ensure_schema(conn)
-
-    total_chunks = 0
-    all_vectors_for_faiss = []  # 收集所有向量用于 FAISS
-    all_metadata_for_faiss = []  # 收集所有元数据用于 FAISS
-    # 遍历所有由 document_loader 返回的 Document 对象
+    # --- 收集所有数据，准备批量处理 ---
+    all_texts = []
+    all_metadata = []
+    chunk_id_counter = 0
+    
     for doc_obj in all_docs:
         content = doc_obj.page_content
-        # 从 Document 对象的元数据中获取原始文件路径
         source_path = doc_obj.metadata.get("source", "unknown_source")
         
-        # --- 使用 SmartTextSplitter 进行语义感知切块 ---
         chunks = splitter.split_text(content)
-        # ----------------------------------------------------
-
+        
         for idx, chunk in enumerate(chunks):
-            embedding = fetch_embedding(chunk)
-            vector_for_faiss = np.array(embedding, dtype=np.float32)  # 为 FAISS 准备
-            # 将块索引、内容和元数据存入数据库
-            upsert_chunk(
-                conn, 
-                path=source_path,      # 来源文件
-                chunk_index=idx,       # 在该文档中的块序号
-                content=chunk,         # 切分后的文本块
-                embedding=embedding    # 对应的向量
-            )
-            conn.commit()
-            # 为 FAISS 索引准备数据
-            all_vectors_for_faiss.append(vector_for_faiss)
-            all_metadata_for_faiss.append({
-                "id": total_chunks,  # 这里的 ID 可以是 SQLite 中的 ID 或一个顺序 ID
+            all_texts.append(chunk)
+            all_metadata.append({
+                "chunk_id": chunk_id_counter,
                 "path": source_path,
                 "chunk_index": idx,
                 "content": chunk
             })
-            total_chunks += 1
-            print(f"[索引] 来自 '{Path(source_path).name}' 的块 #{idx} 已写入")
+            chunk_id_counter += 1
+            print(f"[构建] 预处理块 #{chunk_id_counter}: {Path(source_path).name} - Chunk {idx}")
 
+    if not all_texts:
+        print("[构建] 未生成任何文本块，结束。")
+        return
+
+    print(f"[构建] 共预处理了 {len(all_texts)} 个文本块，开始批量计算嵌入向量...")
+    
+    # --- 连接到 Ollama 并批量获取嵌入向量 ---
+    # 这是唯一需要 Ollama 服务的部分
+    try:
+        all_embeddings = []
+        batch_size = 10  # 根据模型和硬件调整批次大小，避免 Ollama 过载
+        for i in range(0, len(all_texts), batch_size):
+            batch_texts = all_texts[i:i+batch_size]
+            print(f"[构建] 正在处理批次 {i//batch_size + 1}/{math.ceil(len(all_texts)/batch_size)}...")
+            # 注意：Ollama API /api/embeddings 一次只处理一个文本，这里仍需循环
+            # 如果 Ollama 支持批量处理，可以优化
+            batch_embeddings = [fetch_embedding(text) for text in batch_texts]
+            all_embeddings.extend(batch_embeddings)
+    except requests.exceptions.ConnectionError:
+        print("[错误] 无法连接到 Ollama 服务。构建知识库需要 Ollama 运行并提供嵌入模型。")
+        print("请启动 'ollama serve' 并确保模型已拉取。")
+        return
+    except Exception as e:
+        print(f"[错误] 在构建过程中获取嵌入向量时出错: {e}")
+        return
+
+    # --- 数据准备完毕，写入存储 ---
+    vectors_array = np.array(all_embeddings, dtype=np.float32)
+    
+    # 1. 保存 FAISS 索引
+    save_faiss_index_and_metadata(vectors_array, all_metadata)
+
+    # 2. 保存元数据到 SQLite
+    conn = sqlite3.connect(DB_PATH)
+    ensure_schema(conn)
+    metadata_records = [(m["chunk_id"], m["path"], m["chunk_index"], m["content"]) for m in all_metadata]
+    bulk_insert_metadata(conn, metadata_records)
     conn.close()
-    # 构建并保存 FAISS 索引
-    if all_vectors_for_faiss:
-        vectors_array = np.stack(all_vectors_for_faiss)
-        save_faiss_index_and_metadata(vectors_array, all_metadata_for_faiss)
-    print(f"知识库构建完成。共索引了 {total_chunks} 个文本块，并更新了 FAISS 索引。")
+    
+    print(f"[构建] 知识库构建完成。共索引了 {len(all_texts)} 个文本块。")
 
+
+# ----------------------------- RAG pipeline: QUERY PHASE (在线) ----------------------------- #
 def retrieve_contexts(
     question: str,
-    top_k: int = 5, # <--- 增加 Top-K，为压缩提供更多信息
+    top_k: int = 5,
     score_threshold: float = 0.3,
 ) -> List[Tuple[float, str, str, int]]:
-    # 直接使用 FAISS 进行搜索
+    """
+    【查询阶段】：从 FAISS 检索 chunk_id，再从 SQLite 获取内容。
+    """
+    # 直接使用 FAISS 进行搜索，得到分数和 chunk_id
     query_vec = fetch_embedding(question)
     raw_results = search_similar_with_faiss(query_vec, top_k=top_k, score_threshold=score_threshold)
     
-    # 将结果转换为字典格式，便于传递给压缩模型
-    formatted_results = [
-        {"score": score, "content": content, "path": path, "chunk_index": chunk_idx}
-        for score, content, path, chunk_idx in raw_results
-    ]
+    # 批量从数据库加载内容
+    conn = sqlite3.connect(DB_PATH)
+    formatted_results = []
+    for score, chunk_id in raw_results:
+        metadata = get_metadata_by_chunk_id(conn, chunk_id)
+        if metadata:
+            formatted_results.append({"score": score, "chunk_id": chunk_id, **metadata})
     
+    conn.close()
     return formatted_results
 
 def compress_contexts(
     retrieved_results: List[Dict[str, Any]],
     compressor_model: str = COMPRESSOR_MODEL,
-    temperature: float = 0.3, # 压缩任务通常需要更确定性的输出
+    temperature: float = 0.3,
 ) -> str:
     """
     Stage 2: 使用专门的模型对检索到的上下文进行压缩和优化。
@@ -322,8 +356,8 @@ def compress_contexts(
 
 def _prepare_prompt(
     question: str,
-    top_k_retrieve: int = 5, # <--- 检索更多片段
-    top_k_compressed: int = 3, # <--- 最终使用压缩后的片段数
+    top_k_retrieve: int = 5,
+    top_k_compressed: int = 3,
     score_threshold: float = 0.3,
 ) -> Tuple[List[dict], str]:
     # Stage 1: Retrieve
@@ -340,7 +374,7 @@ def _prepare_prompt(
         print("-" * 40)
 
     # Stage 2: Compress
-    compressed_context = compress_contexts(retrieved_results[:top_k_compressed]) # 只压缩前 top_k_compressed 个
+    compressed_context = compress_contexts(retrieved_results[:top_k_compressed])
 
     # 如果压缩失败或返回为空，则回退到原始上下文
     if not compressed_context.strip():
@@ -387,8 +421,8 @@ def answer_question_stream(
 # ----------------------------- CLI entry ----------------------------- #
 def interactive_cli() -> None:
     print("=== 硅基流动 RAG 命令行 ===")
-    print("1. 知识库初始化（索引 doc 目录）")
-    print("2. 开始对话（RAG 问答）")
+    print("1. 知识库初始化（索引 docs 目录）【需要 Ollama】")
+    print("2. 开始对话（RAG 问答）【需要 Ollama】")
     print("0. 退出")
 
     while True:
@@ -398,7 +432,8 @@ def interactive_cli() -> None:
             source_dir = Path(source) if source else DOC_DIR
             chunk_size = input("切片长度（默认 400）：").strip()
             overlap = input("切片重叠长度（默认 50）：").strip()
-            build_knowledge_base(
+            # 调用重构后的构建函数
+            build_knowledge_base_offline(
                 source_dir,
                 chunk_size=int(chunk_size) if chunk_size else 400,
                 overlap=int(overlap) if overlap else 50,
