@@ -162,7 +162,7 @@ class SmartTextSplitter:
                 # 语义连贯，合并
                 current_chunk += " " + next_chunk
                 # 注意：这里为了性能，使用了近似的向量更新，更精确的做法是重新编码合并后的文本块，但这会增加计算量
-                current_embedding = next_embedding  
+                current_embedding = self.model.encode(current_chunk, convert_to_tensor=True, normalize_embeddings=True)  
             else:
                 # 语义不连贯，保存当前块，开始新的块
                 merged_chunks.append(current_chunk.strip())

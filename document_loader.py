@@ -45,7 +45,7 @@ def batch_load_documents(folder_path: str) -> List[Document]:
 
     print("="*50)
     for file_path in folder.glob('*'):
-        if file_path.suffix.lower() in supported_extensions:
+        if file_path.is_file() and file_path.suffix.lower() in supported_extensions:
             print(f"处理文件: {file_path.name}")
             try:
                 docs = load_single_document(str(file_path))
@@ -56,7 +56,7 @@ def batch_load_documents(folder_path: str) -> List[Document]:
                     print(f"警告: {file_path.name} 加载后无内容或被过滤。")
             except Exception as e:
                 print(f"错误: 加载 {file_path.name} 时发生异常: {e}")
-        else:
+        elif file_path.is_file():
             print(f"跳过不支持的文件: {file_path.name}")
     print("="*50)
 
