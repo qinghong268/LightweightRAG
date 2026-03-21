@@ -1,3 +1,4 @@
+# LightweightRAG.py
 """
 RAG 应用主入口 (CLI)
 负责处理用户输入和输出，调用 SimpleRAG 模块执行具体逻辑。
@@ -5,11 +6,11 @@ RAG 应用主入口 (CLI)
 
 from pathlib import Path
 import asyncio
-import core_functions
+import simpleRAG_content
 from config import DOC_DIR, CHUNK_SIZE_DEFAULT, CHUNK_OVERLAP_DEFAULT, DEFAULT_TOP_K, DEFAULT_TOP_K_COMPRESSED, DEFAULT_THRESHOLD
 
 def interactive_cli():
-    rag_instance = core_functions.SimpleRAG() # 创建 RAG 实例
+    rag_instance = simpleRAG_content.SimpleRAG() # 创建 RAG 实例
 
     print("=== 硅基流动 RAG 命令行 ===")
     print("1. 知识库初始化（索引 docs 目录）【需要 Ollama】")

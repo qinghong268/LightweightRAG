@@ -1,3 +1,4 @@
+# config.py
 """
 配置文件，此文件定义了所有可配置的参数。
 """
@@ -8,14 +9,15 @@ from pathlib import Path
 OLLAMA_HOST = "http://localhost:11434"
 CHAT_MODEL = "deepseek-r1:8b"  # 用于最终回答生成的本地模型
 COMPRESSOR_MODEL = "qwen:7b"  # 用于上下文压缩和优化的本地模型
-EMBEDDING_MODEL = "bge-m3:latest" # 用于知识库文档索引的本地模型
+EMBEDDING_MODEL = "bge-m3" # 用于知识库文档索引的本地模型
+RERANK_MODEL = "bge-reranker-v2-m3" # 用于检索结果重排序的模型
 
 # --- 文件路径配置 ---
 CACHE_FILE = Path("embedding_cache.json") # 用于存储嵌入向量的缓存文件
 DB_PATH = Path("knowledge_base.db")       # 知识库数据库文件
 DOC_DIR = Path("docs")                    # 知识库文档目录
-FAISS_INDEX_FILE = "faiss_index.bin"      # 存储 FAISS 索引的文件
-METADATA_FILE = "metadata.json"           # 存储向量对应的元数据 (ID, path, chunk_index, content)
+FAISS_INDEX_FILE = Path("faiss_index.bin")      # 存储 FAISS 索引的文件
+METADATA_FILE = Path("metadata.json")           # 存储向量对应的元数据 (ID, path, chunk_index, content)
 
 # --- RAG 逻辑配置 ---
 DEFAULT_TOP_K = 5 # 检索 Top-K 个片段，为压缩提供更多素材
@@ -28,9 +30,9 @@ CHUNK_SIZE_DEFAULT = 400 # 文档切片的默认长度
 CHUNK_OVERLAP_DEFAULT = 50 # 文档切片的默认重叠长度
 
 # --- 文本分割器配置 ---
-LOCAL_EMBEDDING_MODEL_PATH = "./all-MiniLM-L6-v2"
-SEMANTIC_SPLITTER_MODEL_NAME = "BAAI/bge-large-zh-v1.5"
-SEMANTIC_SPLITTER_THRESHOLD = 0.8
+LOCAL_EMBEDDING_MODEL_PATH = "./models/bge-m3"
+SEMANTIC_SPLITTER_MODEL_NAME = "BAAI/bge-m3"
+SEMANTIC_SPLITTER_THRESHOLD = 0.75
 SEMANTIC_SPLITTER_SEPARATORS = ["\n\n", "\n", "。", "？", "！", "；", "?", "!", ";", "...", " ", ""]
 
 # --- Ollama API 调用配置 ---
