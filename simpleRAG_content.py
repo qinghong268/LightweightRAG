@@ -1,7 +1,7 @@
 # simpleRAG_content.py
 """
-SimpleRAG 模块
-将 RAG 的核心流程（构建、检索、压缩、生成）封装成一个类。
+SimpleRAG模块
+将RAG的核心流程（构建、检索、压缩、生成）封装成一个类。
 """
 
 import sqlite3
@@ -29,13 +29,13 @@ import hashlib
 
 class SimpleRAG:
     """
-    一个集成了文档加载、向量化、索引、检索和生成的完整 RAG 系统。
+    一个集成了文档加载、向量化、索引、检索和生成的完整RAG系统。
     """
 
     def __init__(self):
         logger.info("正在初始化 SimpleRAG 实例...")
         
-        # 1. 处理缓存 (增加模型指纹校验)
+        # 处理缓存(增加模型指纹校验)
         self.cache = {}
         if CACHE_FILE.exists():
             try:
@@ -43,11 +43,11 @@ class SimpleRAG:
                     raw_cache = json.load(f)
                     if "__model_name__" in raw_cache:
                         if raw_cache["__model_name__"] != EMBEDDING_MODEL:
-                            logger.warning(f"检测到模型变更 ({raw_cache['__model_name__']} -> {EMBEDDING_MODEL})，清空旧缓存。")
+                            logger.warning(f"检测到模型变更({raw_cache['__model_name__']} -> {EMBEDDING_MODEL})，清空旧缓存。")
                             self.cache = {}
                         else:
                             self.cache = {k: v for k, v in raw_cache.items() if k != "__model_name__"}
-                            logger.info(f"缓存加载成功，包含 {len(self.cache)} 个向量。")
+                            logger.info(f"缓存加载成功，包含{len(self.cache)}个向量。")
                     else:
                         logger.warning("旧格式缓存，为避免维度错误，已清空。请重新构建知识库。")
                         self.cache = {}
@@ -55,7 +55,7 @@ class SimpleRAG:
                 logger.error(f"读取缓存失败：{e}")
                 self.cache = {}
 
-        # 2. 【关键】预加载嵌入模型（单例）
+        # 预加载嵌入模型（单例）
         logger.info(f"正在预加载嵌入模型：{LOCAL_EMBEDDING_MODEL_PATH} ...")
         try:
             self.embedding_model = SentenceTransformer(
@@ -94,9 +94,9 @@ class SimpleRAG:
         prompt = (
             f"请将以下用户问题改写为更适合在知识库中进行文档检索的形式。\n"
             f"要求：\n"
-            f"1. 补充缺失的关键上下文。\n"
-            f"2. 表达更清晰完整。\n"
-            f"3. **【重要】只输出改写后的问题本身，严禁输出任何分析、解释、前言、后缀、标记或换行符。**\n\n"
+            f"1.补充缺失的关键上下文。\n"
+            f"2.表达更清晰完整。\n"
+            f"3.【重要】只输出改写后的问题本身，严禁输出任何分析、解释、前言、后缀、标记或换行符。\n\n"
             f"原始问题：{original_query}\n\n"
             f"改写后的问题："
         )
@@ -179,19 +179,19 @@ class SimpleRAG:
             yield "问题不能为空。"
             return
 
-        yield f"\n--- 开始查询 ---\n"
+        yield f"\n开始查询\n"
         try:
             index, metadata_list = RAGHelpers.load_faiss_index_and_metadata(FAISS_INDEX_FILE, METADATA_FILE)
             if index is None or len(metadata_list) == 0:
                 yield "知识库为空或未正确加载。\n"
                 return
 
-            yield "--- 步骤 0: 查询理解与改写 ---\n"
+            yield "步骤0:查询理解与改写\n"
             rewritten_query = self._rewrite_query(question)
             yield f"原始问题：{question}\n"
             yield f"改写后问题：{rewritten_query}\n\n"
 
-            yield "--- 步骤 1: 向量化问题 ---\n"
+            yield "步骤1:向量化问题\n"
             with torch.no_grad():
                 question_vector = self.embedding_model.encode(
                     rewritten_query, 
@@ -199,8 +199,8 @@ class SimpleRAG:
                     normalize_embeddings=True
                 )
             question_vector = np.array([question_vector], dtype='float32')
-            yield f"向量化完成 (维度：{question_vector.shape[1]})\n"
-            yield f"\n--- 步骤 2: 在知识库中搜索 Top-{top_k_retrieve} 个相似片段 ---\n"
+            yield f"向量化完成(维度：{question_vector.shape[1]})\n"
+            yield f"\n步骤2:在知识库中搜索Top-{top_k_retrieve}个相似片段 ---\n"
             k = min(len(metadata_list), top_k_retrieve)
             similarities, indices = index.search(question_vector, k)
 
@@ -223,7 +223,7 @@ class SimpleRAG:
                 return
             relevant_results = results_with_scores
 
-            yield f"=== 初始检索命中 (Stage 1) ===\n"
+            yield f"初始检索命中(Stage 1)\n"
             for i, (similarity, path, chunk_index, content) in enumerate(relevant_results[:3]):
                 yield f"[Top{i+1}] 相似度：{similarity:.4f}\n来源：{path}（段落 #{chunk_index}）\n{content[:100]}...\n----------------------------------------\n"
 
@@ -232,37 +232,37 @@ class SimpleRAG:
                 for i, (score, path, chunk_idx, content) in enumerate(relevant_results)
             ]
             
-            yield f"\n--- 步骤 3: 使用交叉编码器重排 Top-{top_k_compressed} 个结果 ---\n"
+            yield f"\n步骤3:使用交叉编码器重排Top-{top_k_compressed}个结果\n"
             reranked_results = self._rerank_results(rewritten_query, formatted_retrieved_results, top_k=top_k_compressed)
             
             if reranked_results and 'rerank_score' in reranked_results[0]:
-                yield f"=== 重排后 Top-{top_k_compressed} 结果 ===\n"
+                yield f"重排后Top-{top_k_compressed}结果\n"
                 for i, item in enumerate(reranked_results):
                     yield f"[Rank{i+1}] 重排分数：{item['rerank_score']:.4f}\n来源：{item['path']}（段落 #{item['chunk_index']}）\n{item['content'][:100]}...\n----------------------------------------\n"
             else:
                 logger.warning("重排失败，使用初始检索顺序。")
-                yield f"=== 重排失败，使用初始检索 Top-{top_k_compressed} 结果 ===\n"
+                yield f"重排失败，使用初始检索Top-{top_k_compressed}结果\n"
                 for i, item in enumerate(reranked_results):
-                    yield f"[Initial Rank{i+1}] 相似度：{item['score']:.4f}\n来源：{item['path']}（段落 #{item['chunk_index']}）\n{item['content'][:100]}...\n----------------------------------------\n"
+                    yield f"[Initial Rank{i+1}]相似度：{item['score']:.4f}\n来源：{item['path']}（段落 #{item['chunk_index']}）\n{item['content'][:100]}...\n----------------------------------------\n"
             
-            yield "\n--- 开始压缩上下文 ---\n"
+            yield "\n开始压缩上下文\n"
             yield f"输入片段数：{len(reranked_results)}\n\n"
             
             compressed_content = self.compress_contexts(reranked_results)
             yield f"调用压缩模型：{self._compressor_model}\n"
-            yield f"压缩后的内容:\n{compressed_content}\n--- 压缩完成 ---\n\n"
+            yield f"压缩后的内容:\n{compressed_content}\n压缩完成\n\n"
 
             final_messages = self.prepare_final_prompt(question, reranked_results, compressed_content)
-            yield f"=== 调用回答生成模型 ===\n"
+            yield f"调用回答生成模型\n"
             yield f"调用模型：{self._chat_model}\n"
             message_str = "\n".join([f"{msg['role']}: {msg['content'][:100]}..." for msg in final_messages])
             yield f"Prompt:\n{message_str}\n"
 
-            yield "\n=== 最终回答 ===\n"
+            yield "\n最终回答\n"
             for token in RAGHelpers._chat_completion_stream(self._ollama_host, final_messages, model_name=self._chat_model, temperature=OLLAMA_CHAT_TEMPERATURE_DEFAULT):
                 yield token
 
         except Exception as e:
             logger.error(f"流式问答过程中发生错误：{e}", exc_info=True)
-            yield f"\n[错误] 在处理您的请求时发生了内部错误：{e}\n"
+            yield f"\n[错误]在处理您的请求时发生了内部错误：{e}\n"
             return

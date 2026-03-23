@@ -4,26 +4,26 @@ from pathlib import Path
 from typing import List, Union
 from langchain_core.documents import Document
 
-# --- Import loaders with error handling ---
+# 导入带有错误处理的加载器
 try:
     from langchain_community.document_loaders import PyPDFLoader
     PDF_AVAILABLE = True
 except ImportError:
-    print("警告: 未安装 PyPDF2 或其他 PDF 库。无法加载 PDF 文件。")
+    print("警告:未安装PyPDF2或其他PDF库。无法加载PDF文件。")
     PDF_AVAILABLE = False
 
 try:
     from langchain_community.document_loaders import Docx2txtLoader
     DOCX_AVAILABLE = True
 except ImportError:
-    print("警告: 未安装 python-docx。无法加载 Word (.docx) 文件。")
+    print("警告:未安装python-docx。无法加载Word(.docx)文件。")
     DOCX_AVAILABLE = False
 
 try:
     from langchain_community.document_loaders import TextLoader
     TEXT_AVAILABLE = True
 except ImportError:
-    print("警告: 未安装 langchain-community 中的 TextLoader。")
+    print("警告:未安装langchain-community中的TextLoader。")
     TEXT_AVAILABLE = False
 
 
@@ -33,7 +33,7 @@ def batch_load_documents(folder_path: str) -> List[Document]:
     """
     folder = Path(folder_path)
     if not folder.exists() or not folder.is_dir():
-        print(f"错误: 文件夹 '{folder_path}' 不存在或不是一个目录。")
+        print(f"错误:文件夹'{folder_path}'不存在或不是一个目录。")
         return []
 
     all_docs = []
@@ -46,22 +46,22 @@ def batch_load_documents(folder_path: str) -> List[Document]:
     print("="*50)
     for file_path in folder.glob('*'):
         if file_path.is_file() and file_path.suffix.lower() in supported_extensions:
-            print(f"处理文件: {file_path.name}")
+            print(f"处理文件:{file_path.name}")
             try:
                 docs = load_single_document(str(file_path))
                 if docs:
                     all_docs.extend(docs)
-                    print(f"{file_path.suffix.upper()[1:]}加载成功: {file_path.name}")
+                    print(f"{file_path.suffix.upper()[1:]}加载成功:{file_path.name}")
                 else:
-                    print(f"警告: {file_path.name} 加载后无内容或被过滤。")
+                    print(f"警告:{file_path.name}加载后无内容或被过滤")
             except Exception as e:
-                print(f"错误: 加载 {file_path.name} 时发生异常: {e}")
+                print(f"错误:加载{file_path.name}时发生异常:{e}")
         elif file_path.is_file():
-            print(f"跳过不支持的文件: {file_path.name}")
+            print(f"跳过不支持的文件:{file_path.name}")
     print("="*50)
 
-    print(f"批量处理完成！\n总文件数: {len([p for p in folder.glob('*') if p.suffix.lower() in supported_extensions])}")
-    print(f"成功文档块数: {len(all_docs)}")
+    print(f"批量处理完成！\n总文件数:{len([p for p in folder.glob('*') if p.suffix.lower() in supported_extensions])}")
+    print(f"成功文档块数:{len(all_docs)}")
     return all_docs
 
 
@@ -75,16 +75,16 @@ def load_single_document(file_path: str) -> List[Document]:
     elif file_path.lower().endswith(".docx") and DOCX_AVAILABLE:
         loader = Docx2txtLoader(file_path)
     elif file_path.lower().endswith(".txt") and TEXT_AVAILABLE:
-        # TextLoader 需要 encoding 参数来正确处理中文
+        # TextLoader需要encoding参数来正确处理中文
         loader = TextLoader(file_path, encoding='utf-8')
     else:
         # 文件类型不受支持或缺少相应库
         return []
 
     if loader:
-        # load() 方法返回一个 Document 对象的列表
+        # load()方法返回一个Document对象的列表
         docs = loader.load()
-        # 为每个 Document 对象添加来源元数据
+        # 为每个Document对象添加来源元数据
         for doc in docs:
             doc.metadata['source'] = file_path
         return docs
@@ -95,4 +95,4 @@ if __name__ == "__main__":
     # 测试代码
     docs = batch_load_documents("./docs")
     for i, doc in enumerate(docs):
-        print(f"Doc {i+1} from {doc.metadata['source']}: {doc.page_content[:50]}...")
+        print(f"Doc{i+1}from{doc.metadata['source']}: {doc.page_content[:50]}...")

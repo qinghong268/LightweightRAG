@@ -65,19 +65,19 @@ class SmartTextSplitter:
             timer.cancel()
 
             if load_thread.is_alive():
-                print(f"[警告] 模型加载超时 ({self.load_timeout} 秒)。")
-                print("[信息] 将回退到基于字符长度的基础切分。")
+                print(f"[警告]模型加载超时 ({self.load_timeout} 秒)。")
+                print("[信息]将回退到基于字符长度的基础切分。")
                 self.use_semantic_splitting = False
             else:
                 status, value = result_queue.get_nowait()
                 if status == 'success':
                     self.model = value
-                    print(f"[信息] 语义模型加载成功，设备: {device}, 阈值: {threshold}")
+                    print(f"[信息]语义模型加载成功，设备:{device}, 阈值:{threshold}")
                 else:
                     raise value
         except Exception as e:
-            print(f"[警告] 语义模型加载失败: {e}")
-            print("[信息] 将回退到基于字符长度的基础切分。")
+            print(f"[警告]语义模型加载失败: {e}")
+            print("[信息]将回退到基于字符长度的基础切分。")
             self.use_semantic_splitting = False
 
     def split_text(self, text: str):
@@ -87,7 +87,7 @@ class SmartTextSplitter:
         if self.use_semantic_splitting and self.model is not None:
             return self._perform_semantic_split(text)
         else:
-            print("[信息] 执行基础字符分割...")
+            print("[信息]执行基础字符分割...")
             return self.base_splitter.split_text(text)
 
     def _perform_semantic_split(self, text: str):

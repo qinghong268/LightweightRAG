@@ -3,7 +3,7 @@ import logging
 from pathlib import Path
 import numpy as np
 
-# --- 从 config 导入所有配置 ---
+# 导入配置
 from config import (
     # Ollama
     OLLAMA_HOST,

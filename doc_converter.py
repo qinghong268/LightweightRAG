@@ -1,5 +1,5 @@
 """
-文档格式转换工具 - 将.doc文件批量转换为.docx格式
+文档格式转换工具，将.doc文件批量转换为.docx格式
 请求管理员权限，转换后文件替换到原位置，备份原始文件
 """
 import os
@@ -45,7 +45,7 @@ def request_admin_and_restart():
         executable,      # 程序路径
         params,          # 参数
         work_dir,        # 工作目录
-        1                # 显示方式：1=正常窗口
+        1                # 显示方式：正常窗口
     )
 
     sys.exit(0)  # 退出当前非管理员进程
@@ -210,8 +210,7 @@ def batch_convert_docs(input_folder, force_overwrite=False):
     backup_folder.mkdir(exist_ok=True)
     print(f" 备份文件夹: {backup_folder}")
 
-    # --- 优化部分开始 ---
-    # 1. 初始化 COM 并启动 Word 应用
+    # 初始化COM并启动Word应用
     print(" 启动Word引擎...")
     pythoncom.CoInitialize()
     word_app = None
@@ -224,7 +223,6 @@ def batch_convert_docs(input_folder, force_overwrite=False):
         print(f" 无法启动Word应用程序: {e}")
         pythoncom.CoUninitialize()
         return False
-    # --- 优化部分结束 ---
 
     # 开始转换
     print(" 开始批量转换...")
@@ -244,7 +242,7 @@ def batch_convert_docs(input_folder, force_overwrite=False):
         elif output_path.exists() and force_overwrite:
             print(f"   目标文件已存在，--force 参数启用，正在覆盖: {output_path.name}")
 
-        # 2. 将 word_app 实例传递给转换函数
+        # 将word_app实例传递给转换函数
         success = convert_single_doc_optimized(word_app, str(doc_file), str(output_path))
 
         if success:
@@ -270,8 +268,7 @@ def batch_convert_docs(input_folder, force_overwrite=False):
         else:
             failed_files.append(f"{doc_file.name}")
 
-    # --- 优化部分开始 ---
-    # 3. 在所有转换完成后，统一退出 Word 应用并反初始化 COM
+    # 在所有转换完成后，统一退出Word应用并反初始化COM
     print("\n 正在关闭Word引擎...")
     if word_app:
         try:
@@ -284,12 +281,10 @@ def batch_convert_docs(input_folder, force_overwrite=False):
         print(" COM 组件已清理")
     except Exception as e:
         print(f"  清理COM时出错: {e}")
-    # --- 优化部分结束 ---
-
+    
     # 显示统计信息
-    print("\n" + "="*50)
+    print("\n")
     print(" 转换统计")
-    print("="*50)
     print(f" 成功转换: {success_count}/{len(unique_files)} 个文件")
 
     if failed_files:
@@ -298,9 +293,9 @@ def batch_convert_docs(input_folder, force_overwrite=False):
             print(f"  - {filename}")
 
         print("\n 对于转换失败的文件，可以尝试:")
-        print("  1. 手动用Microsoft Word打开并另存为.docx格式")
-        print("  2. 确保文件没有损坏")
-        print("  3. 缩短文件名（建议少于50字符）")
+        print("  1.手动用Microsoft Word打开并另存为.docx格式")
+        print("  2.确保文件没有损坏")
+        print("  3.缩短文件名（建议少于50字符）")
     else:
         print(" 所有文件转换成功!")
 
@@ -342,7 +337,7 @@ def main():
         request_admin_and_restart()
 
     print("="*60)
-    print(" .doc 文件批量转换工具")
+    print(".doc文件批量转换工具")
     print("="*60)
 
     # 显示当前文件夹结构
@@ -376,7 +371,7 @@ def main():
         start_time = time.time()
         print(f"\n开始自动转换...")
         if args.force:
-            print(f"注意: --force 模式已启用，将覆盖已存在的 .docx 文件。")
+            print(f"注意: --force 模式已启用，将覆盖已存在的.docx文件。")
         success = batch_convert_docs(args.input, args.force)
         end_time = time.time()
 

@@ -20,7 +20,7 @@ try:
     RERANKER_AVAILABLE = True
 except ImportError:
     RERANKER_AVAILABLE = False
-    logger.warning("未安装 FlagEmbedding，重排功能将不可用。")
+    logger.warning("未安装FlagEmbedding，重排功能将不可用。")
 
 class RAGQuerier:
     def __init__(self, ollama_host: str, chat_model: str, compressor_model: str, reranker_model_name: str):
@@ -30,11 +30,11 @@ class RAGQuerier:
         self._reranker_model_name = reranker_model_name
         self._reranker_model_path = f"./models/{reranker_model_name}"
         self._reranker = None
-        self.embedding_model = None  # 将由 SimpleRAG 注入
+        self.embedding_model = None  # 将由SimpleRAG注入
 
     def set_embedding_model(self, model_instance: SentenceTransformer):
         self.embedding_model = model_instance
-        logger.debug("RAGQuerier 已注入嵌入模型实例。")
+        logger.debug("RAGQuerier已注入嵌入模型实例。")
 
     def _load_reranker(self):
         if self._reranker is None and RERANKER_AVAILABLE:
@@ -71,7 +71,7 @@ class RAGQuerier:
         try:
             index, metadata_map = RAGHelpers.load_faiss_index_and_metadata(FAISS_INDEX_FILE, METADATA_FILE)
         except Exception as e:
-            logger.error(f"加载 FAISS 失败：{e}")
+            logger.error(f"加载FAISS失败：{e}")
             return []
             
         query_array = np.array([query_vec], dtype=np.float32)

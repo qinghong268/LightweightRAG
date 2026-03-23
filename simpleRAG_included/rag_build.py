@@ -22,7 +22,7 @@ from .config_imports import (
 class RAGBuilder:
     def __init__(self, cache: Dict[str, List[float]], embedding_model_instance=None):
         self.cache = cache
-        self.embedding_model = embedding_model_instance  # 使用外部传入的模型
+        self.embedding_model = embedding_model_instance  # 使用传入的模型
         self.splitter = SmartTextSplitter(
             model_path=LOCAL_EMBEDDING_MODEL_PATH,
             model_name=SEMANTIC_SPLITTER_MODEL_NAME,
