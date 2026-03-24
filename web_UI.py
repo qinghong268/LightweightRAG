@@ -1,6 +1,7 @@
 import gradio as gr
 import asyncio
 import time
+import threading
 from pathlib import Path
 import sys
 import os
@@ -87,6 +88,26 @@ class OutputLogger:
 logger = OutputLogger()
 rag_instance = simpleRAG_content.SimpleRAG()
 
+def _run_async_in_thread(coro):
+    """
+    在线程中运行协程，避免在已运行事件循环中直接 run_until_complete。
+    """
+    result = {"value": None, "error": None}
+
+    def _runner():
+        try:
+            result["value"] = asyncio.run(coro)
+        except Exception as exc:
+            result["error"] = exc
+
+    worker = threading.Thread(target=_runner, daemon=False)
+    worker.start()
+    worker.join()
+
+    if result["error"] is not None:
+        raise result["error"]
+    return result["value"]
+
 # 核心逻辑
 
 def build_knowledge_base_task(source_dir_str, chunk_size, overlap, progress=gr.Progress()):
@@ -106,13 +127,7 @@ def build_knowledge_base_task(source_dir_str, chunk_size, overlap, progress=gr.P
                 overlap=int(overlap)
             )
         
-        try:
-            loop = asyncio.get_event_loop()
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-        
-        loop.run_until_complete(run_build())
+        _run_async_in_thread(run_build())
         
         try:
             count = len(rag_instance.index) if hasattr(rag_instance, 'index') else "未知"

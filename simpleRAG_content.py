@@ -165,7 +165,7 @@ class SimpleRAG:
 
     def answer_question(self, question: str, top_k_retrieve: int = DEFAULT_TOP_K, top_k_compressed: int = DEFAULT_TOP_K_COMPRESSED, score_threshold: float = DEFAULT_THRESHOLD) -> str:
         rewritten_query = self._rewrite_query(question)
-        retrieved_results = self.retrieve_contexts(rewritten_query, top_k=top_k_retrieve, score_threshold=score_threshold)
+        retrieved_results = self.retrieve_contexts(question, top_k=top_k_retrieve, score_threshold=score_threshold)
         if not retrieved_results:
             return "检索未命中相关片段，请检查知识库或降低阈值。"
 

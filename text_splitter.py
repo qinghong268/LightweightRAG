@@ -58,11 +58,7 @@ class SmartTextSplitter:
             load_thread.daemon = True
             load_thread.start()
 
-            timer = threading.Timer(self.load_timeout, lambda t: t.join() or t._stop() if t.is_alive() else None, [load_thread])
-            timer.start()
-
             load_thread.join(timeout=self.load_timeout)
-            timer.cancel()
 
             if load_thread.is_alive():
                 print(f"[警告]模型加载超时 ({self.load_timeout} 秒)。")
