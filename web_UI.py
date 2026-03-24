@@ -1,7 +1,10 @@
+# web_UI.py
 import gradio as gr
 import asyncio
 import time
 import threading
+import io
+import contextlib
 from pathlib import Path
 import sys
 import os
@@ -11,7 +14,8 @@ import html
 # 导入配置和核心模块
 try:
     import simpleRAG_content
-    from config import DOC_DIR, CHUNK_SIZE_DEFAULT, CHUNK_OVERLAP_DEFAULT, DEFAULT_TOP_K, DEFAULT_TOP_K_COMPRESSED, DEFAULT_THRESHOLD
+    from config import DOC_DIR, CHUNK_SIZE_DEFAULT, CHUNK_OVERLAP_DEFAULT, DEFAULT_TOP_K, DEFAULT_TOP_K_COMPRESSED, DEFAULT_THRESHOLD, FAISS_INDEX_FILE, METADATA_FILE
+    from simpleRAG_included.rag_helpers import RAGHelpers
 except ImportError as e:
     print(f"导入失败：{e}")
     sys.exit(1)
@@ -32,7 +36,8 @@ def is_process_log(text):
         "开始查询", "步骤", "改写后问题", "向量化", "相似片段", "Top", "相似度:", 
         "来源:", "重排", "重排分数", "Rank", "压缩上下文", "输入片段数", 
         "调用压缩模型", "摘要", "调用回答生成模型", "Prompt:", "system:", "user:",
-        "压缩完成", "初始检索命中"
+        "压缩完成", "初始检索命中", "Reranker状态", "阈值过滤后无命中", "阈值后命中不足", "引用不完整",
+        "压缩上下文引用校验未通过", "诊断指标"
     ]
     if any(k in text for k in keywords):
         return True
@@ -126,11 +131,22 @@ def build_knowledge_base_task(source_dir_str, chunk_size, overlap, progress=gr.P
                 chunk_size=int(chunk_size), 
                 overlap=int(overlap)
             )
-        
-        _run_async_in_thread(run_build())
+
+        # 捕获构建过程中的控制台输出（print + logging 默认stderr）
+        captured_stdout = io.StringIO()
+        captured_stderr = io.StringIO()
+        with contextlib.redirect_stdout(captured_stdout), contextlib.redirect_stderr(captured_stderr):
+            _run_async_in_thread(run_build())
+
+        runtime_output = (captured_stdout.getvalue() + captured_stderr.getvalue()).strip()
+        if runtime_output:
+            logs += runtime_output
+            if not logs.endswith("\n"):
+                logs += "\n"
         
         try:
-            count = len(rag_instance.index) if hasattr(rag_instance, 'index') else "未知"
+            index, _ = RAGHelpers.load_faiss_index_and_metadata(FAISS_INDEX_FILE, METADATA_FILE)
+            count = index.ntotal if index is not None else "未知"
             logs += logger.write_log(f" 索引构建成功！总向量数：{count}")
             logs += logger.write_log(f" 索引文件已保存至本地。")
         except:
@@ -182,6 +198,11 @@ def answer_question_task(question, history, top_k_ret, top_k_comp, threshold, lo
                 # 实时刷新日志文本和HTML列表（虽然列表内容还没变，但保持同步）
                 yield new_history, log_history_state, clean_log_text(current_q_logs), generate_logs_html(log_history_state)
             else:
+                if chunk == simpleRAG_content.SimpleRAG.ANSWER_REPLACE_MARKER:
+                    full_answer = ""
+                    new_history[-1]["content"] = ""
+                    yield new_history, log_history_state, clean_log_text(current_q_logs), generate_logs_html(log_history_state)
+                    continue
                 full_answer += chunk
                 new_history[-1]["content"] = full_answer
                 yield new_history, log_history_state, clean_log_text(current_q_logs), generate_logs_html(log_history_state)

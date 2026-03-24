@@ -23,17 +23,18 @@ METADATA_FILE = Path("metadata.json")           # 存储向量对应的元数据
 DEFAULT_TOP_K = 5 # 检索Top-K个片段，为压缩提供更多素材
 DEFAULT_TOP_K_COMPRESSED = 3 # 压缩后最终使用的片段数
 DEFAULT_THRESHOLD = 0.3 # 默认相似度阈值
+MIN_RETRIEVE_KEEP = 2 # 阈值过滤后至少保留的检索结果数量
 
 #构建阶段
 BATCH_SIZE_DOCS = 10 # 每次处理的文档数量，可根据内存情况调整
-CHUNK_SIZE_DEFAULT = 400 # 文档切片的默认长度
-CHUNK_OVERLAP_DEFAULT = 50 # 文档切片的默认重叠长度
+CHUNK_SIZE_DEFAULT = 220 # 文档切片的默认长度
+CHUNK_OVERLAP_DEFAULT = 40 # 文档切片的默认重叠长度
 
 #文本分割器
 LOCAL_EMBEDDING_MODEL_PATH = "./models/bge-m3"
 SEMANTIC_SPLITTER_MODEL_NAME = "BAAI/bge-m3"
-SEMANTIC_SPLITTER_THRESHOLD = 0.75
-SEMANTIC_SPLITTER_SEPARATORS = ["\n\n", "\n", "。", "？", "！", "；", "?", "!", ";", "...", " ", ""]
+SEMANTIC_SPLITTER_THRESHOLD = 0.85
+SEMANTIC_SPLITTER_SEPARATORS = ["\n\n", "\n", "。", "？", "！", "；", "?", "!", ";", "..."]
 
 #Ollama API调用
 OLLAMA_CHAT_TEMPERATURE_DEFAULT = 0.7

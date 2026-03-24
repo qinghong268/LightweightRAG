@@ -9,7 +9,7 @@ from sentence_transformers import SentenceTransformer
 from .config_imports import (
     logger, OLLAMA_HOST, CHAT_MODEL, COMPRESSOR_MODEL, DEFAULT_TOP_K, 
     DEFAULT_TOP_K_COMPRESSED, DEFAULT_THRESHOLD, OLLAMA_CHAT_TEMPERATURE_DEFAULT, 
-    OLLAMA_COMPRESSOR_TEMPERATURE_DEFAULT, DB_PATH, FAISS_INDEX_FILE, METADATA_FILE
+    OLLAMA_COMPRESSOR_TEMPERATURE_DEFAULT, DB_PATH, FAISS_INDEX_FILE, METADATA_FILE, MIN_RETRIEVE_KEEP
 )
 from .rag_helpers import RAGHelpers
 from .rag_exceptions import ModelConnectionError
@@ -45,6 +45,13 @@ class RAGQuerier:
             except Exception as e:
                 logger.error(f"重排模型加载失败：{e}")
 
+    def get_reranker_status(self) -> str:
+        if not RERANKER_AVAILABLE:
+            return "unavailable"
+        if self._reranker is None:
+            return "not_loaded"
+        return "ready"
+
     def _rerank_results(self, query: str, results: list, top_k: int = 5) -> list:
         if not results or not query:
             return results
@@ -67,7 +74,13 @@ class RAGQuerier:
             logger.error(f"重排失败：{e}")
             return results[:top_k]
 
-    def search_similar_with_faiss(self, query_vec: List[float], top_k: int, score_threshold: float) -> List[Tuple[float, int]]:
+    def search_similar_with_faiss(
+        self,
+        query_vec: List[float],
+        top_k: int,
+        score_threshold: float,
+        min_keep: int = MIN_RETRIEVE_KEEP
+    ) -> List[Tuple[float, int]]:
         try:
             index, metadata_map = RAGHelpers.load_faiss_index_and_metadata(FAISS_INDEX_FILE, METADATA_FILE)
         except Exception as e:
@@ -76,16 +89,26 @@ class RAGQuerier:
             
         query_array = np.array([query_vec], dtype=np.float32)
         faiss.normalize_L2(query_array)
-        scores, indices = index.search(query_array, top_k)
+        candidate_k = min(len(metadata_map), max(top_k, top_k * 3, min_keep))
+        scores, indices = index.search(query_array, candidate_k)
         
         results = []
+        fallback_candidates = []
         for i in range(len(indices[0])):
             idx = indices[0][i]
             score = scores[0][i]
-            if score >= score_threshold and idx < len(metadata_map):
+            if idx < len(metadata_map):
                 chunk_id = metadata_map[idx]["chunk_id"]
-                results.append((float(score), chunk_id))
-        return results
+                candidate = (float(score), chunk_id)
+                fallback_candidates.append(candidate)
+                if score >= score_threshold:
+                    results.append(candidate)
+
+        if len(results) < int(min_keep) and fallback_candidates:
+            keep_n = max(1, min(int(min_keep), len(fallback_candidates)))
+            logger.info(f"阈值后命中不足，已回退保留 Top-{keep_n} 结果。")
+            return fallback_candidates[:keep_n]
+        return results[:top_k]
 
     def compress_contexts(self, retrieved_results: List[Dict[str, Any]], compressor_model: str = None, temperature: float = OLLAMA_COMPRESSOR_TEMPERATURE_DEFAULT) -> str:
         if not retrieved_results:

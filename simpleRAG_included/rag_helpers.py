@@ -101,16 +101,24 @@ class RAGHelpers:
         """确保SQLite数据库表结构存在。"""
         conn.execute("""
             CREATE TABLE IF NOT EXISTS metadata (
-                chunk_id INTEGER PRIMARY KEY, path TEXT, chunk_index INTEGER, content TEXT
+                chunk_id INTEGER PRIMARY KEY, path TEXT, chunk_index INTEGER, content TEXT, chunk_hash TEXT
             );
         """)
+        # 兼容旧库：如果旧表没有 chunk_hash 字段则补上
+        cols = [row[1] for row in conn.execute("PRAGMA table_info(metadata);").fetchall()]
+        if "chunk_hash" not in cols:
+            conn.execute("ALTER TABLE metadata ADD COLUMN chunk_hash TEXT;")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_path ON metadata(path);")
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_chunk_hash_unique ON metadata(chunk_hash);")
         conn.commit()
 
     @staticmethod
     def bulk_insert_metadata(conn: sqlite3.Connection, records: List[Tuple]) -> None:
         """批量插入元数据到数据库。"""
-        conn.executemany("INSERT OR REPLACE INTO metadata (chunk_id, path, chunk_index, content) VALUES (?, ?, ?, ?)", records)
+        conn.executemany(
+            "INSERT OR REPLACE INTO metadata (chunk_id, path, chunk_index, content, chunk_hash) VALUES (?, ?, ?, ?, ?)",
+            records
+        )
         conn.commit()
 
     @staticmethod
@@ -124,6 +132,29 @@ class RAGHelpers:
         if result:
             return {"path": result[0], "chunk_index": result[1], "content": result[2]}
         return {}
+
+    @staticmethod
+    def get_existing_chunk_hashes(conn: sqlite3.Connection) -> set:
+        cursor = conn.cursor()
+        cursor.execute("SELECT chunk_hash FROM metadata WHERE chunk_hash IS NOT NULL AND chunk_hash != ''")
+        return {row[0] for row in cursor.fetchall()}
+
+    @staticmethod
+    def get_existing_path_content_keys(conn: sqlite3.Connection) -> set:
+        """
+        兼容历史去重策略变更时的增量构建：
+        用(path, content)作为二级去重键，避免一次性重复追加。
+        """
+        cursor = conn.cursor()
+        cursor.execute("SELECT path, content FROM metadata")
+        return {(row[0], row[1]) for row in cursor.fetchall()}
+
+    @staticmethod
+    def get_max_chunk_id(conn: sqlite3.Connection) -> int:
+        cursor = conn.cursor()
+        cursor.execute("SELECT MAX(chunk_id) FROM metadata")
+        value = cursor.fetchone()[0]
+        return int(value) if value is not None else -1
 
     @staticmethod
     def create_initial_faiss_index(dimension: int) -> faiss.Index:

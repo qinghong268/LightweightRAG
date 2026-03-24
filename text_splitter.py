@@ -90,6 +90,7 @@ class SmartTextSplitter:
         initial_chunks = self.base_splitter.split_text(text)
         if len(initial_chunks) <= 1:
             return initial_chunks
+        max_merged_chars = int(self.base_splitter._chunk_size * 1.3)
         
         with torch.no_grad():
             embeddings = self.model.encode(
@@ -107,8 +108,9 @@ class SmartTextSplitter:
             next_chunk = initial_chunks[i]
             next_embedding = embeddings[i]
             similarity = util.cos_sim(current_embedding, next_embedding).item()
+            can_merge_by_length = (len(current_chunk) + 1 + len(next_chunk)) <= max_merged_chars
             
-            if similarity >= self.threshold:
+            if similarity >= self.threshold and can_merge_by_length:
                 current_chunk += " " + next_chunk
                 current_embedding = self.model.encode(current_chunk, convert_to_tensor=True, normalize_embeddings=True)
             else:

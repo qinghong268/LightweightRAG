@@ -13,9 +13,10 @@ from typing import Iterable, List, Dict, Any, Tuple
 # 引入拆分后的模块
 from simpleRAG_included.config_imports import (
     logger, OLLAMA_HOST, CHAT_MODEL, COMPRESSOR_MODEL, EMBEDDING_MODEL,
-    LOCAL_EMBEDDING_MODEL_PATH, DEFAULT_TOP_K, DEFAULT_TOP_K_COMPRESSED, 
+    LOCAL_EMBEDDING_MODEL_PATH, DEFAULT_TOP_K, DEFAULT_TOP_K_COMPRESSED,
     DEFAULT_THRESHOLD, OLLAMA_CHAT_TEMPERATURE_DEFAULT, DB_PATH, CACHE_FILE,
-    FAISS_INDEX_FILE, METADATA_FILE,RERANK_MODEL,OLLAMA_COMPRESSOR_TEMPERATURE_DEFAULT
+    FAISS_INDEX_FILE, METADATA_FILE, RERANK_MODEL, OLLAMA_COMPRESSOR_TEMPERATURE_DEFAULT,
+    MIN_RETRIEVE_KEEP
 )
 from simpleRAG_included.rag_exceptions import RAGException, ModelConnectionError, BuildError
 from simpleRAG_included.rag_helpers import RAGHelpers
@@ -26,11 +27,13 @@ import torch
 from sentence_transformers import SentenceTransformer
 import json
 import hashlib
+import re
 
 class SimpleRAG:
     """
     一个集成了文档加载、向量化、索引、检索和生成的完整RAG系统。
     """
+    ANSWER_REPLACE_MARKER = "__RAG_REPLACE_ANSWER__"
 
     def __init__(self):
         logger.info("正在初始化 SimpleRAG 实例...")
@@ -137,7 +140,25 @@ class SimpleRAG:
         return self._querier.prepare_final_prompt(question, contexts, compressed_context)
 
     def search_similar_with_faiss(self, query_vec: List[float], top_k: int, score_threshold: float) -> List[Tuple[float, int]]:
-        return self._querier.search_similar_with_faiss(query_vec, top_k, score_threshold)
+        return self._querier.search_similar_with_faiss(query_vec, top_k, score_threshold, min_keep=MIN_RETRIEVE_KEEP)
+
+    def _validate_citations(self, text: str, contexts: List[Dict[str, Any]]) -> bool:
+        if not text.strip():
+            return False
+        matches = re.findall(r"\[source=([^\]#]+)#chunk(\d+)\]", text, flags=re.IGNORECASE)
+        if not matches:
+            return False
+
+        valid_sources = {(str(c.get("path", "")).strip(), str(c.get("chunk_index", "")).strip()) for c in contexts}
+        if not valid_sources:
+            return False
+
+        return any((source_path.strip(), chunk_idx.strip()) in valid_sources for source_path, chunk_idx in matches)
+
+    def _build_raw_context(self, contexts: List[Dict[str, Any]]) -> str:
+        return "\n".join(
+            [f"[source={c['path']}#chunk{c['chunk_index']}] {c['content']}" for c in contexts]
+        )
 
     def retrieve_contexts(self, question: str, top_k: int = DEFAULT_TOP_K, score_threshold: float = DEFAULT_THRESHOLD) -> List[Dict[str, Any]]:
         if not question.strip(): return []
@@ -169,10 +190,26 @@ class SimpleRAG:
         if not retrieved_results:
             return "检索未命中相关片段，请检查知识库或降低阈值。"
 
+        logger.info(f"Reranker状态: {self._querier.get_reranker_status()}")
         reranked_results = self._rerank_results(rewritten_query, retrieved_results, top_k=top_k_compressed)
         compressed_context = self.compress_contexts(reranked_results)
+        if not self._validate_citations(compressed_context, reranked_results):
+            logger.warning("压缩上下文引用校验未通过，改为原始上下文。")
+            compressed_context = self._build_raw_context(reranked_results)
         messages = self.prepare_final_prompt(question, reranked_results, compressed_context)
-        return RAGHelpers._chat_completion(self._ollama_host, messages, model_name=self._chat_model, temperature=OLLAMA_CHAT_TEMPERATURE_DEFAULT)
+        answer = RAGHelpers._chat_completion(self._ollama_host, messages, model_name=self._chat_model, temperature=OLLAMA_CHAT_TEMPERATURE_DEFAULT)
+        if self._validate_citations(answer, reranked_results):
+            return answer
+
+        logger.warning("回答引用校验未通过，降级为原始上下文重试。")
+        raw_context = self._build_raw_context(reranked_results)
+        fallback_messages = self.prepare_final_prompt(question, reranked_results, raw_context)
+        return RAGHelpers._chat_completion(
+            self._ollama_host,
+            fallback_messages,
+            model_name=self._chat_model,
+            temperature=OLLAMA_CHAT_TEMPERATURE_DEFAULT
+        )
 
     def answer_question_stream(self, question: str, top_k_retrieve: int = DEFAULT_TOP_K, top_k_compressed: int = DEFAULT_TOP_K_COMPRESSED, score_threshold: float = DEFAULT_THRESHOLD) -> Iterable[str]:
         if not question.strip():
@@ -181,6 +218,9 @@ class SimpleRAG:
 
         yield f"\n开始查询\n"
         try:
+            fallback_retrieval_used = False
+            citation_retry_used = False
+            reranker_status = self._querier.get_reranker_status()
             index, metadata_list = RAGHelpers.load_faiss_index_and_metadata(FAISS_INDEX_FILE, METADATA_FILE)
             if index is None or len(metadata_list) == 0:
                 yield "知识库为空或未正确加载。\n"
@@ -201,22 +241,23 @@ class SimpleRAG:
             question_vector = np.array([question_vector], dtype='float32')
             yield f"向量化完成(维度：{question_vector.shape[1]})\n"
             yield f"\n步骤2:在知识库中搜索Top-{top_k_retrieve}个相似片段 ---\n"
-            k = min(len(metadata_list), top_k_retrieve)
-            similarities, indices = index.search(question_vector, k)
-
+            raw_results = self.search_similar_with_faiss(
+                question_vector[0].tolist(),
+                top_k=top_k_retrieve,
+                score_threshold=score_threshold
+            )
             results_with_scores = []
             conn = sqlite3.connect(DB_PATH)
-            for i in range(len(indices[0])):
-                idx = indices[0][i]
-                similarity_score = similarities[0][i]
-
-                if idx < len(metadata_list) and similarity_score >= score_threshold:
-                    chunk_id = metadata_list[idx]["chunk_id"]
-                    full_metadata = RAGHelpers.get_metadata_by_chunk_id(conn, chunk_id)
-                    if full_metadata:
-                        results_with_scores.append((similarity_score, full_metadata['path'], full_metadata['chunk_index'], full_metadata['content']))
+            for similarity_score, chunk_id in raw_results:
+                full_metadata = RAGHelpers.get_metadata_by_chunk_id(conn, chunk_id)
+                if full_metadata:
+                    item = (similarity_score, full_metadata['path'], full_metadata['chunk_index'], full_metadata['content'])
+                    results_with_scores.append(item)
             
             conn.close()
+            if results_with_scores and len(results_with_scores) < MIN_RETRIEVE_KEEP:
+                fallback_retrieval_used = True
+                yield f"阈值后命中不足，已按保底策略返回{len(results_with_scores)}个结果。\n"
             results_with_scores.sort(key=lambda x: x[0], reverse=True)
             if not results_with_scores:
                 yield "未找到相关的文档片段。\n"
@@ -234,6 +275,8 @@ class SimpleRAG:
             
             yield f"\n步骤3:使用交叉编码器重排Top-{top_k_compressed}个结果\n"
             reranked_results = self._rerank_results(rewritten_query, formatted_retrieved_results, top_k=top_k_compressed)
+            reranker_status = self._querier.get_reranker_status()
+            yield f"Reranker状态：{reranker_status}\n"
             
             if reranked_results and 'rerank_score' in reranked_results[0]:
                 yield f"重排后Top-{top_k_compressed}结果\n"
@@ -249,6 +292,9 @@ class SimpleRAG:
             yield f"输入片段数：{len(reranked_results)}\n\n"
             
             compressed_content = self.compress_contexts(reranked_results)
+            if not self._validate_citations(compressed_content, reranked_results):
+                yield "压缩上下文引用校验未通过，回退为原始上下文。\n"
+                compressed_content = self._build_raw_context(reranked_results)
             yield f"调用压缩模型：{self._compressor_model}\n"
             yield f"压缩后的内容:\n{compressed_content}\n压缩完成\n\n"
 
@@ -259,8 +305,30 @@ class SimpleRAG:
             yield f"Prompt:\n{message_str}\n"
 
             yield "\n最终回答\n"
+            full_answer = ""
             for token in RAGHelpers._chat_completion_stream(self._ollama_host, final_messages, model_name=self._chat_model, temperature=OLLAMA_CHAT_TEMPERATURE_DEFAULT):
+                full_answer += token
                 yield token
+
+            if not self._validate_citations(full_answer, reranked_results):
+                citation_retry_used = True
+                yield "\n\n[提示]检测到回答引用不完整，正在使用原始上下文重试...\n"
+                # 通知上层UI用重试答案替换首轮答案，避免双答案拼接
+                yield self.ANSWER_REPLACE_MARKER
+                raw_context = self._build_raw_context(reranked_results)
+                fallback_messages = self.prepare_final_prompt(question, reranked_results, raw_context)
+                for token in RAGHelpers._chat_completion_stream(
+                    self._ollama_host,
+                    fallback_messages,
+                    model_name=self._chat_model,
+                    temperature=OLLAMA_CHAT_TEMPERATURE_DEFAULT
+                ):
+                    yield token
+
+            yield (
+                f"\n\n诊断指标: reranker={reranker_status}, "
+                f"retrieval_fallback={fallback_retrieval_used}, citation_retry={citation_retry_used}\n"
+            )
 
         except Exception as e:
             logger.error(f"流式问答过程中发生错误：{e}", exc_info=True)

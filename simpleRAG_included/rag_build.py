@@ -54,10 +54,25 @@ class RAGBuilder:
 
         conn = sqlite3.connect(DB_PATH)
         RAGHelpers.ensure_schema(conn)
-        
-        initial_index = None
-        global_chunk_id = 0
-        all_metadata = []
+
+        # 增量模式：尽可能复用已有索引与元数据
+        if FAISS_INDEX_FILE.exists() and METADATA_FILE.exists():
+            try:
+                initial_index, all_metadata = RAGHelpers.load_faiss_index_and_metadata(FAISS_INDEX_FILE, METADATA_FILE)
+                logger.info(f"[构建] 进入增量更新模式，现有向量数：{initial_index.ntotal}")
+            except Exception as e:
+                logger.warning(f"[构建] 读取已有索引失败，将重新创建索引。原因: {e}")
+                initial_index = None
+                all_metadata = []
+        else:
+            initial_index = None
+            all_metadata = []
+
+        global_chunk_id = RAGHelpers.get_max_chunk_id(conn) + 1
+        existing_hashes = RAGHelpers.get_existing_chunk_hashes(conn)
+        existing_path_content_keys = RAGHelpers.get_existing_path_content_keys(conn)
+        total_added = 0
+        total_skipped = 0
 
         batches = list(self._load_document_batches(source_dir, BATCH_SIZE_DOCS))
         total = len(batches)
@@ -109,20 +124,29 @@ class RAGBuilder:
                     chunk_text = all_chunks[chunk_ptr]
                     emb = embeddings[chunk_ptr]
                     
-                    h = hashlib.sha256(chunk_text.encode()).hexdigest()
+                    # 去重粒度按“来源文档 + 文本块”，避免不同文档同内容被误去重
+                    h = hashlib.sha256(f"{source_path}::{chunk_text}".encode()).hexdigest()
                     if h in self.cache:
                         emb = self.cache[h]
                     else:
                         self.cache[h] = emb
                     
                     if emb and len(emb) > 0:
+                        dedupe_key = (source_path, chunk_text)
+                        if h in existing_hashes or dedupe_key in existing_path_content_keys:
+                            total_skipped += 1
+                            chunk_ptr += 1
+                            continue
                         batch_valid_embs.append(emb)
                         batch_valid_meta.append({
                             "chunk_id": global_chunk_id,
                             "path": source_path,
                             "chunk_index": j,
-                            "content": chunk_text
+                            "content": chunk_text,
+                            "chunk_hash": h
                         })
+                        existing_hashes.add(h)
+                        existing_path_content_keys.add(dedupe_key)
                         global_chunk_id += 1
                     
                     chunk_ptr += 1
@@ -136,10 +160,19 @@ class RAGBuilder:
                 logger.info(f"创建新索引，维度：{dim}")
                 initial_index = RAGHelpers.create_initial_faiss_index(dim)
             
+            if initial_index.d != vec_array.shape[1]:
+                raise BuildError(
+                    f"索引维度不匹配：已有索引维度={initial_index.d}，当前向量维度={vec_array.shape[1]}。"
+                )
+
             RAGHelpers.add_vectors_to_faiss_index(initial_index, vec_array)
             all_metadata.extend(batch_valid_meta)
+            total_added += len(batch_valid_meta)
 
-            records = [(m['chunk_id'], m['path'], m['chunk_index'], m['content']) for m in batch_valid_meta]
+            records = [
+                (m['chunk_id'], m['path'], m['chunk_index'], m['content'], m['chunk_hash'])
+                for m in batch_valid_meta
+            ]
             RAGHelpers.bulk_insert_metadata(conn, records)
             
             logger.info(f"批次 {idx+1} 完成：新增 {len(batch_valid_meta)} 个块。")
@@ -150,4 +183,6 @@ class RAGBuilder:
             RAGHelpers.save_faiss_index_and_metadata(initial_index, all_metadata, FAISS_INDEX_FILE, METADATA_FILE)
         
         elapsed = time.time() - start_time
-        logger.info(f"[完成] 总耗时 {elapsed:.2f}s, 总块数 {len(all_metadata)}")
+        logger.info(
+            f"[完成] 总耗时 {elapsed:.2f}s, 索引总块数 {len(all_metadata)}, 本次新增 {total_added}, 本次跳过重复 {total_skipped}"
+        )
