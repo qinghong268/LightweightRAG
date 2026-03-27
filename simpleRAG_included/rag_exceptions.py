@@ -1,12 +1,14 @@
-# rag_exceptions.py
 class RAGException(Exception):
-    """自定义异常基类，便于统一错误处理。"""
-    pass
+    """Base exception for RAG-related failures."""
+
 
 class ModelConnectionError(RAGException):
-    """当无法连接到Ollama或模型服务时抛出。"""
-    pass
+    """Raised when the Ollama service or model backend is unavailable."""
+
 
 class BuildError(RAGException):
-    """在构建知识库过程中发生错误时抛出。"""
-    pass
+    """Raised when knowledge-base build steps fail."""
+
+
+class SnapshotLoadError(RAGException):
+    """Raised when the FAISS/metadata snapshot cannot be loaded consistently."""

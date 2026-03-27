@@ -1,26 +1,31 @@
-# rag_query.py
-import requests
-import numpy as np
+import sqlite3
+from typing import Any, Dict, List
+
 import faiss
+import numpy as np
 import torch
-from typing import List, Dict, Any, Tuple
 from sentence_transformers import SentenceTransformer
 
-from .config_imports import (
-    logger, OLLAMA_HOST, CHAT_MODEL, COMPRESSOR_MODEL, DEFAULT_TOP_K, 
-    DEFAULT_TOP_K_COMPRESSED, DEFAULT_THRESHOLD, OLLAMA_CHAT_TEMPERATURE_DEFAULT, 
-    OLLAMA_COMPRESSOR_TEMPERATURE_DEFAULT, DB_PATH, FAISS_INDEX_FILE, METADATA_FILE, MIN_RETRIEVE_KEEP
-)
-from .rag_helpers import RAGHelpers
-from .rag_exceptions import ModelConnectionError
 import prompts
+from .config_imports import (
+    DB_PATH,
+    FAISS_INDEX_FILE,
+    METADATA_FILE,
+    MIN_RETRIEVE_KEEP,
+    OLLAMA_COMPRESSOR_TEMPERATURE_DEFAULT,
+    logger,
+)
+from .rag_exceptions import SnapshotLoadError
+from .rag_helpers import RAGHelpers
 
 try:
     from FlagEmbedding import FlagReranker
+
     RERANKER_AVAILABLE = True
 except ImportError:
     RERANKER_AVAILABLE = False
-    logger.warning("未安装FlagEmbedding，重排功能将不可用。")
+    logger.warning("FlagEmbedding is not installed; reranking will be unavailable.")
+
 
 class RAGQuerier:
     def __init__(self, ollama_host: str, chat_model: str, compressor_model: str, reranker_model_name: str):
@@ -30,20 +35,24 @@ class RAGQuerier:
         self._reranker_model_name = reranker_model_name
         self._reranker_model_path = f"./models/{reranker_model_name}"
         self._reranker = None
-        self.embedding_model = None  # 将由SimpleRAG注入
+        self.embedding_model = None
 
     def set_embedding_model(self, model_instance: SentenceTransformer):
         self.embedding_model = model_instance
-        logger.debug("RAGQuerier已注入嵌入模型实例。")
+        logger.debug("RAGQuerier received the shared embedding model instance.")
 
     def _load_reranker(self):
         if self._reranker is None and RERANKER_AVAILABLE:
             try:
                 device = "cuda" if torch.cuda.is_available() else "cpu"
-                self._reranker = FlagReranker(self._reranker_model_path, use_fp16=True, device=device)
-                logger.info(f"重排模型加载成功：{self._reranker_model_path}")
-            except Exception as e:
-                logger.error(f"重排模型加载失败：{e}")
+                self._reranker = FlagReranker(
+                    self._reranker_model_path,
+                    use_fp16=True,
+                    device=device,
+                )
+                logger.info(f"Reranker model loaded from {self._reranker_model_path}")
+            except Exception as exc:
+                logger.error(f"Failed to load reranker model: {exc}")
 
     def get_reranker_status(self) -> str:
         if not RERANKER_AVAILABLE:
@@ -60,18 +69,18 @@ class RAGQuerier:
             if not self._reranker:
                 return results[:top_k]
 
-        pairs = [[query, item['content']] for item in results]
+        pairs = [[query, item["content"]] for item in results]
         try:
             scores = self._reranker.compute_score(pairs, normalize=True)
             if not isinstance(scores, list):
                 scores = [scores] * len(results)
-            
-            for i, res in enumerate(results):
-                res['rerank_score'] = float(scores[i])
-            
-            return sorted(results, key=lambda x: x['rerank_score'], reverse=True)[:top_k]
-        except Exception as e:
-            logger.error(f"重排失败：{e}")
+
+            for i, result in enumerate(results):
+                result["rerank_score"] = float(scores[i])
+
+            return sorted(results, key=lambda item: item["rerank_score"], reverse=True)[:top_k]
+        except Exception as exc:
+            logger.error(f"Reranking failed: {exc}")
             return results[:top_k]
 
     def search_similar_with_faiss(
@@ -79,45 +88,92 @@ class RAGQuerier:
         query_vec: List[float],
         top_k: int,
         score_threshold: float,
-        min_keep: int = MIN_RETRIEVE_KEEP
-    ) -> List[Tuple[float, int]]:
-        try:
-            index, metadata_map = RAGHelpers.load_faiss_index_and_metadata(FAISS_INDEX_FILE, METADATA_FILE)
-        except Exception as e:
-            logger.error(f"加载FAISS失败：{e}")
-            return []
-            
-        query_array = np.array([query_vec], dtype=np.float32)
-        faiss.normalize_L2(query_array)
-        candidate_k = min(len(metadata_map), max(top_k, top_k * 3, min_keep))
-        scores, indices = index.search(query_array, candidate_k)
-        
-        results = []
-        fallback_candidates = []
-        for i in range(len(indices[0])):
-            idx = indices[0][i]
-            score = scores[0][i]
-            if idx < len(metadata_map):
-                chunk_id = metadata_map[idx]["chunk_id"]
-                candidate = (float(score), chunk_id)
-                fallback_candidates.append(candidate)
-                if score >= score_threshold:
-                    results.append(candidate)
+        min_keep: int = MIN_RETRIEVE_KEEP,
+    ) -> List[Dict[str, Any]]:
+        with RAGHelpers.SNAPSHOT_FILE_LOCK:
+            try:
+                index, metadata_map = RAGHelpers.load_faiss_index_and_metadata(
+                    FAISS_INDEX_FILE,
+                    METADATA_FILE,
+                )
+            except Exception as exc:
+                logger.error(f"Failed to load FAISS snapshot: {exc}")
+                raise SnapshotLoadError(f"Failed to load knowledge-base snapshot: {exc}") from exc
 
-        if len(results) < int(min_keep) and fallback_candidates:
-            keep_n = max(1, min(int(min_keep), len(fallback_candidates)))
-            logger.info(f"阈值后命中不足，已回退保留 Top-{keep_n} 结果。")
-            return fallback_candidates[:keep_n]
-        return results[:top_k]
+            if index is None or not metadata_map:
+                return []
 
-    def compress_contexts(self, retrieved_results: List[Dict[str, Any]], compressor_model: str = None, temperature: float = OLLAMA_COMPRESSOR_TEMPERATURE_DEFAULT) -> str:
+            query_array = np.array([query_vec], dtype=np.float32)
+            faiss.normalize_L2(query_array)
+            candidate_k = min(len(metadata_map), max(top_k, top_k * 3, min_keep))
+            scores, indices = index.search(query_array, candidate_k)
+
+            ranked_hits: List[Dict[str, Any]] = []
+            selected_chunk_ids: List[int] = []
+            for i in range(len(indices[0])):
+                idx = indices[0][i]
+                if idx >= len(metadata_map):
+                    continue
+                chunk_id = metadata_map[idx].get("chunk_id")
+                if chunk_id is None:
+                    continue
+                ranked_hits.append({"score": float(scores[0][i]), "chunk_id": int(chunk_id)})
+                selected_chunk_ids.append(int(chunk_id))
+
+            if not ranked_hits:
+                return []
+
+            conn = sqlite3.connect(DB_PATH)
+            try:
+                metadata_lookup = RAGHelpers.get_metadata_by_chunk_ids(conn, selected_chunk_ids)
+            finally:
+                conn.close()
+
+        complete_results = []
+        for hit in ranked_hits:
+            metadata = metadata_lookup.get(hit["chunk_id"])
+            if not metadata:
+                continue
+            complete_results.append(
+                {
+                    **hit,
+                    "path": metadata["path"],
+                    "chunk_index": metadata["chunk_index"],
+                    "content": metadata["content"],
+                }
+            )
+
+        threshold_hits = [item for item in complete_results if item["score"] >= score_threshold]
+        if len(threshold_hits) < int(min_keep) and complete_results:
+            keep_n = max(1, min(int(min_keep), len(complete_results)))
+            logger.info(f"Threshold hits were too few; falling back to Top-{keep_n} candidates.")
+            return complete_results[:keep_n]
+        return threshold_hits[:top_k]
+
+    def compress_contexts(
+        self,
+        retrieved_results: List[Dict[str, Any]],
+        compressor_model: str = None,
+        temperature: float = OLLAMA_COMPRESSOR_TEMPERATURE_DEFAULT,
+    ) -> str:
         if not retrieved_results:
             return ""
         if compressor_model is None:
             compressor_model = self._compressor_model
-            
+
         messages = prompts.get_compress_prompt_template(retrieved_results)
         return RAGHelpers._chat_completion(self._ollama_host, messages, compressor_model, temperature)
 
-    def prepare_final_prompt(self, question: str, contexts: List[Dict[str, Any]], compressed_context: str) -> List[dict]:
-        return prompts.get_rag_prompt_template(compressed_context if compressed_context.strip() else "\n".join([c['content'] for c in contexts]), question)
+    def prepare_final_prompt(
+        self,
+        question: str,
+        contexts: List[Dict[str, Any]],
+        compressed_context: str,
+        history_text: str = "",
+    ) -> List[dict]:
+        context_text = (
+            compressed_context
+            if compressed_context.strip()
+            else "\n".join([item["content"] for item in contexts])
+        )
+        return prompts.get_rag_prompt_template(context_text, question, history_text)

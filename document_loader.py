@@ -1,98 +1,142 @@
-# document_loader.py
-import os
 from pathlib import Path
-from typing import List, Union
+from typing import List
+
 from langchain_core.documents import Document
 
-# 导入带有错误处理的加载器
 try:
     from langchain_community.document_loaders import PyPDFLoader
+
     PDF_AVAILABLE = True
 except ImportError:
-    print("警告:未安装PyPDF2或其他PDF库。无法加载PDF文件。")
+    print("Warning: PDF loader dependency is missing. PDF files will be skipped.")
     PDF_AVAILABLE = False
 
 try:
     from langchain_community.document_loaders import Docx2txtLoader
+
     DOCX_AVAILABLE = True
 except ImportError:
-    print("警告:未安装python-docx。无法加载Word(.docx)文件。")
+    print("Warning: DOCX loader dependency is missing. DOCX files will be skipped.")
     DOCX_AVAILABLE = False
 
-try:
-    from langchain_community.document_loaders import TextLoader
-    TEXT_AVAILABLE = True
-except ImportError:
-    print("警告:未安装langchain-community中的TextLoader。")
-    TEXT_AVAILABLE = False
+
+TEXT_FALLBACK_ENCODINGS = (
+    "utf-8-sig",
+    "utf-8",
+    "gb18030",
+    "gbk",
+    "gb2312",
+)
+MAX_UNSUPPORTED_LOG_EXAMPLES = 10
+
+
+def _iter_files(folder: Path) -> List[Path]:
+    return sorted(
+        (path for path in folder.rglob("*") if path.is_file()),
+        key=lambda path: str(path.relative_to(folder)).lower(),
+    )
+
+
+def _load_text_document(file_path: Path) -> List[Document]:
+    last_error = None
+    for encoding in TEXT_FALLBACK_ENCODINGS:
+        try:
+            content = file_path.read_text(encoding=encoding)
+        except UnicodeDecodeError as exc:
+            last_error = exc
+            continue
+        except OSError as exc:
+            last_error = exc
+            break
+        return [
+            Document(
+                page_content=content,
+                metadata={"source": str(file_path), "encoding": encoding},
+            )
+        ]
+
+    raise ValueError(
+        f"Unable to decode text file {file_path} with fallback encodings: {last_error}"
+    )
 
 
 def batch_load_documents(folder_path: str) -> List[Document]:
-    """
-    批量加载指定文件夹中的所有支持格式的文档。
-    """
     folder = Path(folder_path)
     if not folder.exists() or not folder.is_dir():
-        print(f"错误:文件夹'{folder_path}'不存在或不是一个目录。")
+        print(f"Error: folder '{folder_path}' does not exist or is not a directory.")
         return []
 
-    all_docs = []
-    supported_extensions = {'.txt'}
+    all_docs: List[Document] = []
+    supported_extensions = {".txt"}
     if PDF_AVAILABLE:
-        supported_extensions.add('.pdf')
+        supported_extensions.add(".pdf")
     if DOCX_AVAILABLE:
-        supported_extensions.add('.docx')
+        supported_extensions.add(".docx")
 
-    print("="*50)
-    for file_path in folder.glob('*'):
-        if file_path.is_file() and file_path.suffix.lower() in supported_extensions:
-            print(f"处理文件:{file_path.name}")
-            try:
-                docs = load_single_document(str(file_path))
-                if docs:
-                    all_docs.extend(docs)
-                    print(f"{file_path.suffix.upper()[1:]}加载成功:{file_path.name}")
-                else:
-                    print(f"警告:{file_path.name}加载后无内容或被过滤")
-            except Exception as e:
-                print(f"错误:加载{file_path.name}时发生异常:{e}")
-        elif file_path.is_file():
-            print(f"跳过不支持的文件:{file_path.name}")
-    print("="*50)
+    discovered_files = _iter_files(folder)
+    supported_files = [
+        file_path
+        for file_path in discovered_files
+        if file_path.suffix.lower() in supported_extensions
+    ]
+    unsupported_examples = []
+    unsupported_count = 0
 
-    print(f"批量处理完成！\n总文件数:{len([p for p in folder.glob('*') if p.suffix.lower() in supported_extensions])}")
-    print(f"成功文档块数:{len(all_docs)}")
+    print("=" * 50)
+    for file_path in discovered_files:
+        relative_path = file_path.relative_to(folder)
+        if file_path.suffix.lower() not in supported_extensions:
+            unsupported_count += 1
+            if len(unsupported_examples) < MAX_UNSUPPORTED_LOG_EXAMPLES:
+                unsupported_examples.append(str(relative_path))
+            continue
+
+        print(f"Processing file: {relative_path}")
+        try:
+            docs = load_single_document(str(file_path))
+            if docs:
+                all_docs.extend(docs)
+                print(
+                    f"Loaded {file_path.suffix.upper()[1:]} file successfully: {relative_path}"
+                )
+            else:
+                print(f"Warning: file had no usable content after loading: {relative_path}")
+        except Exception as exc:
+            print(f"Error: failed to load {relative_path}: {exc}")
+    print("=" * 50)
+
+    print("Batch processing completed:")
+    print(f"Supported files found: {len(supported_files)}")
+    if unsupported_count:
+        print(f"Unsupported files skipped: {unsupported_count}")
+        for example in unsupported_examples:
+            print(f"Unsupported example: {example}")
+        remaining = unsupported_count - len(unsupported_examples)
+        if remaining > 0:
+            print(f"... and {remaining} more unsupported files.")
+    print(f"Document chunks loaded: {len(all_docs)}")
     return all_docs
 
 
 def load_single_document(file_path: str) -> List[Document]:
-    """
-    根据文件扩展名加载单个文档。
-    """
+    path = Path(file_path)
     loader = None
     if file_path.lower().endswith(".pdf") and PDF_AVAILABLE:
         loader = PyPDFLoader(file_path)
     elif file_path.lower().endswith(".docx") and DOCX_AVAILABLE:
         loader = Docx2txtLoader(file_path)
-    elif file_path.lower().endswith(".txt") and TEXT_AVAILABLE:
-        # TextLoader需要encoding参数来正确处理中文
-        loader = TextLoader(file_path, encoding='utf-8')
+    elif file_path.lower().endswith(".txt"):
+        return _load_text_document(path)
     else:
-        # 文件类型不受支持或缺少相应库
         return []
 
-    if loader:
-        # load()方法返回一个Document对象的列表
-        docs = loader.load()
-        # 为每个Document对象添加来源元数据
-        for doc in docs:
-            doc.metadata['source'] = file_path
-        return docs
-    return []
+    docs = loader.load() if loader else []
+    for doc in docs:
+        doc.metadata["source"] = str(path)
+    return docs
 
 
 if __name__ == "__main__":
-    # 测试代码
     docs = batch_load_documents("./docs")
     for i, doc in enumerate(docs):
-        print(f"Doc{i+1}from{doc.metadata['source']}: {doc.page_content[:50]}...")
+        print(f"Doc{i + 1} from {doc.metadata['source']}: {doc.page_content[:50]}...")
