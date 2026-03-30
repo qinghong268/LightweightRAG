@@ -1,397 +1,477 @@
 """
-文档格式转换工具，将.doc文件批量转换为.docx格式
-请求管理员权限，转换后文件替换到原位置，备份原始文件
+Document conversion helpers for turning legacy .doc files into .docx files.
+
+This module keeps the standalone CLI utility, and also exposes importable
+helpers that can be safely used by the Web knowledge-base build flow.
 """
-import os
-import sys
+
+import argparse
 import ctypes
+import os
 import shutil
+import subprocess
+import sys
+import tempfile
+import time
 import traceback
 from pathlib import Path
-import time
-import re
-import tempfile
-import argparse
+from typing import Dict, Iterable, List
 
 
-def is_admin():
-    """检查当前是否以管理员权限运行"""
+DOC_FILE_FORMAT = 16
+BACKUP_DIR_NAME = "backup"
+
+
+def is_admin() -> bool:
+    """Check whether the current process is running with admin privileges."""
     try:
         return ctypes.windll.shell32.IsUserAnAdmin() != 0
-    except:
+    except Exception:
         return False
 
 
-def request_admin_and_restart():
-    """
-    请求管理员权限并重启程序
-    """
-    # 获取当前脚本路径
+def request_admin_and_restart() -> None:
+    """Restart the current script with admin privileges."""
     script_path = os.path.abspath(sys.argv[0])
     work_dir = os.path.dirname(script_path)
 
-    # 构建参数
-    if script_path.endswith('.py'):
+    if script_path.endswith(".py"):
         executable = sys.executable
-        params = script_path + ' ' + ' '.join(sys.argv[1:])  # 保留原有命令行参数
+        params = script_path + " " + " ".join(sys.argv[1:])
     else:
         executable = script_path
         params = " ".join(sys.argv[1:])
 
-    # 使用ShellExecuteW请求管理员权限
     result = ctypes.windll.shell32.ShellExecuteW(
-        None,            # 父窗口句柄
-        "runas",         # 操作：以管理员身份运行
-        executable,      # 程序路径
-        params,          # 参数
-        work_dir,        # 工作目录
-        1                # 显示方式：正常窗口
+        None,
+        "runas",
+        executable,
+        params,
+        work_dir,
+        1,
     )
 
-    sys.exit(0)  # 退出当前非管理员进程
+    if result <= 32:
+        raise RuntimeError("Unable to request admin privileges and restart the program.")
+
+    sys.exit(0)
 
 
-def check_win32com():
-    """检查并安装必要的库"""
+def check_win32com(allow_install: bool = True):
+    """Load pywin32 dependencies, optionally attempting installation."""
     try:
         import pythoncom
         from win32com import client as wc
-        return True, pythoncom, wc
-    except ImportError:
-        print(" 未安装必要的库: pywin32")
-        print("正在尝试安装...")
 
+        return True, pythoncom, wc, ""
+    except ImportError as exc:
+        if not allow_install:
+            message = (
+                "Missing pywin32; .doc preprocessing will be skipped in this run. "
+                "Install it manually with: pip install pywin32"
+            )
+            return False, None, None, f"{message} ({exc})"
+
+        print("Missing required dependency: pywin32")
+        print("Trying to install pywin32...")
         try:
-            import subprocess
             subprocess.check_call([sys.executable, "-m", "pip", "install", "pywin32"])
 
             import pythoncom
             from win32com import client as wc
-            print(" pywin32安装成功")
-            return True, pythoncom, wc
-        except Exception as e:
-            print(f" 安装失败: {e}")
-            print("请手动运行: pip install pywin32")
-            return False, None, None
+
+            print("pywin32 installed successfully")
+            return True, pythoncom, wc, ""
+        except Exception as install_exc:
+            print(f"Failed to install pywin32: {install_exc}")
+            print("Please run manually: pip install pywin32")
+            return False, None, None, str(install_exc)
 
 
-def sanitize_filename(filename):
-    """
-    清理文件名，移除可能导致问题的字符
-    """
-    # 移除文件扩展名
-    name, ext = os.path.splitext(filename)
-
-    # 替换可能导致问题的字符
-    # Windows不允许的字符: < > : " / \ | ? *
-    invalid_chars = r'[<>:"/\\|?*]'
-    name = re.sub(invalid_chars, '_', name)
-
-    # 清理开头和结尾的空格和点
-    name = name.strip('. ')
-
-    # 限制文件名长度（Windows限制255字符）
-    if len(name) > 100:
-        name = name[:100] + "..."
-
-    return name + ext
-
-
-def create_short_temp_path(original_path, temp_dir):
-    """
-    为长路径文件创建简短的临时路径
-    """
-    # 生成一个简单的文件名
+def create_short_temp_path(temp_dir: str, suffix: str = ".doc") -> str:
+    """Create a short temporary path to avoid long-path issues in Word."""
     import uuid
-    temp_name = f"temp_{uuid.uuid4().hex[:8]}.doc"
-    temp_path = os.path.join(temp_dir, temp_name)
 
-    return temp_path
+    temp_name = f"temp_{uuid.uuid4().hex[:8]}{suffix}"
+    return os.path.join(temp_dir, temp_name)
 
 
-def convert_single_doc_optimized(word_app, doc_path, output_path):
+def _close_word_document(doc) -> None:
+    """Close a Word document if it is open."""
+    if doc is None:
+        return
+    try:
+        doc.Close(SaveChanges=False)
+    except Exception:
+        pass
+
+
+def _is_relative_backup_path(relative_path: Path, backup_dir_name: str = BACKUP_DIR_NAME) -> bool:
+    return any(part.lower() == backup_dir_name.lower() for part in relative_path.parts)
+
+
+def iter_doc_files(
+    input_folder: Path,
+    recursive: bool = True,
+    skip_backup: bool = True,
+    backup_dir_name: str = BACKUP_DIR_NAME,
+) -> List[Path]:
+    """Discover .doc files under a folder."""
+    root = Path(input_folder)
+    candidates: Iterable[Path]
+    if recursive:
+        candidates = root.rglob("*.doc")
+    else:
+        candidates = root.glob("*.doc")
+
+    doc_files: List[Path] = []
+    for path in candidates:
+        if not path.is_file():
+            continue
+        try:
+            relative_path = path.relative_to(root)
+        except ValueError:
+            relative_path = path
+        if skip_backup and _is_relative_backup_path(relative_path, backup_dir_name):
+            continue
+        if path.suffix.lower() != ".doc":
+            continue
+        doc_files.append(path)
+
+    return sorted(doc_files, key=lambda item: str(item.relative_to(root)).lower())
+
+
+def build_backup_path(
+    root_folder: Path,
+    doc_path: Path,
+    backup_dir_name: str = BACKUP_DIR_NAME,
+) -> Path:
+    """Build a backup destination preserving the original relative path."""
+    relative_path = doc_path.relative_to(root_folder)
+    return root_folder / backup_dir_name / relative_path
+
+
+def ensure_unique_path(path: Path) -> Path:
+    """Avoid overwriting an existing backup file."""
+    if not path.exists():
+        return path
+
+    stem = path.stem
+    suffix = path.suffix
+    counter = 1
+    while True:
+        candidate = path.with_name(f"{stem}_{counter}{suffix}")
+        if not candidate.exists():
+            return candidate
+        counter += 1
+
+
+def convert_single_doc_optimized(word_app, doc_path: str, output_path: str) -> bool:
     """
-    优化版本：转换单个.doc文件为.docx
-    word_app: 一个已启动的Word应用程序实例
+    Convert a single .doc file to .docx using an existing Word application.
     """
     try:
-        # 检查文件是否存在
         if not os.path.exists(doc_path):
-            print(f"   文件不存在: {doc_path}")
+            print(f"   File does not exist: {doc_path}")
             return False
 
-        # 检查文件大小
         file_size = os.path.getsize(doc_path)
         if file_size == 0:
-            print(f"   文件为空: {doc_path}")
+            print(f"   File is empty: {doc_path}")
             return False
 
-        print(f"   正在转换: {os.path.basename(doc_path)}")
-        print(f"    文件大小: {file_size / 1024:.1f} KB")
+        print(f"   Converting: {os.path.basename(doc_path)}")
+        print(f"    File size: {file_size / 1024:.1f} KB")
 
-        # 创建一个临时目录来处理长文件名
         with tempfile.TemporaryDirectory() as temp_dir:
-            # 为长路径文件创建简短的临时路径
-            temp_input_path = create_short_temp_path(doc_path, temp_dir)
-            temp_output_path = temp_input_path.replace('.doc', '.docx')
+            doc = None
+            temp_input_path = create_short_temp_path(temp_dir, suffix=".doc")
+            temp_output_path = temp_input_path.replace(".doc", ".docx")
 
             try:
-                # 复制原文件到临时位置（使用简短路径）
                 shutil.copy2(doc_path, temp_input_path)
-                print(f"    已复制到临时位置: {temp_input_path}")
+                print(f"    Copied to temporary path: {temp_input_path}")
 
-                # 使用传入的word_app实例打开文件
-                print(f"    正在用Word打开文件...")
+                print("    Opening in Word...")
                 doc = word_app.Documents.Open(temp_input_path)
 
-                # 保存为.docx格式
-                print(f"    正在保存为.docx...")
-                doc.SaveAs2(temp_output_path, FileFormat=16)  # 16 = .docx格式
-                doc.Close(SaveChanges=False)
+                print("    Saving as .docx...")
+                doc.SaveAs2(temp_output_path, FileFormat=DOC_FILE_FORMAT)
+                _close_word_document(doc)
+                doc = None
 
-                # 检查输出文件是否存在
                 if not os.path.exists(temp_output_path):
-                    print(f"   转换失败: 输出文件未创建")
+                    print("   Conversion failed: output .docx was not created")
                     return False
 
-                # 复制转换后的文件到目标位置
                 shutil.copy2(temp_output_path, output_path)
-
-                print(f"   转换完成")
+                print("   Conversion completed")
                 return True
 
-            except Exception as e:
-                print(f"   Word操作失败: {str(e)}")
-                print(f"      详细错误: {traceback.format_exc()}") # 添加详细错误追踪
+            except Exception as exc:
+                print(f"   Word conversion failed: {exc}")
+                print(f"      Traceback: {traceback.format_exc()}")
                 return False
+            finally:
+                _close_word_document(doc)
 
-    except Exception as e:
-        print(f"   转换过程失败: {str(e)}")
-        print(f"      详细错误: {traceback.format_exc()}")
+    except Exception as exc:
+        print(f"   Conversion process failed: {exc}")
+        print(f"      Traceback: {traceback.format_exc()}")
         return False
 
 
-def batch_convert_docs(input_folder, force_overwrite=False):
-    """批量转换指定文件夹中的.doc文件"""
-    docs_folder = Path(input_folder)
-    if not docs_folder.exists():
-        print(f" 输入文件夹不存在: {docs_folder}")
-        return False
+def _empty_preprocess_report(source_dir: Path) -> Dict[str, object]:
+    return {
+        "source_dir": str(source_dir),
+        "detected_doc_files": 0,
+        "converted_doc_files": 0,
+        "archived_doc_files": 0,
+        "skipped_existing_docx": [],
+        "failed_doc_files": [],
+        "archive_failed_doc_files": [],
+        "errors": [],
+    }
 
-    # 检查win32com库
-    win32com_available, pythoncom, wc = check_win32com()
-    if not win32com_available:
-        return False
 
-    print(f"\n 正在扫描输入文件夹: {docs_folder}")
+def preprocess_doc_files_for_build(
+    input_folder,
+    force_overwrite: bool = False,
+    skip_backup: bool = True,
+    backup_dir_name: str = BACKUP_DIR_NAME,
+    allow_install: bool = False,
+) -> Dict[str, object]:
+    """
+    Recursively preprocess .doc files before a knowledge-base build.
 
-    # 查找所有.doc文件（统一使用小写扩展名）
-    doc_files = [f for f in docs_folder.iterdir() if f.is_file() and f.suffix.lower() == '.doc']
+    Behavior:
+    - Scan for .doc files recursively
+    - Skip anything inside backup/
+    - Convert to same-folder .docx
+    - Move original .doc into backup/<relative path>/
+    - Continue gracefully on failures
+    """
+    source_dir = Path(input_folder)
+    report = _empty_preprocess_report(source_dir)
 
-    # 去重（按文件名）
-    unique_files = []
-    seen_names = set()
-    for file_path in doc_files:
-        if file_path.name not in seen_names:
-            seen_names.add(file_path.name)
-            unique_files.append(file_path)
+    if not source_dir.exists() or not source_dir.is_dir():
+        report["errors"].append(f"Source directory does not exist or is not a folder: {source_dir}")
+        return report
 
-    print(f" 找到 {len(unique_files)} 个.doc文件:")
-    for i, doc_file in enumerate(unique_files, 1):
-        size_kb = doc_file.stat().st_size / 1024
-        print(f"  {i}. {doc_file.name} ({size_kb:.1f} KB)")
+    doc_files = iter_doc_files(
+        source_dir,
+        recursive=True,
+        skip_backup=skip_backup,
+        backup_dir_name=backup_dir_name,
+    )
+    report["detected_doc_files"] = len(doc_files)
 
-    if not unique_files:
-        print(" 未找到.doc文件")
-        return True
+    if not doc_files:
+        return report
 
-    # 创建backup文件夹
-    backup_folder = docs_folder / "backup"
-    backup_folder.mkdir(exist_ok=True)
-    print(f" 备份文件夹: {backup_folder}")
+    available, pythoncom, wc, dependency_message = check_win32com(allow_install=allow_install)
+    if not available:
+        report["errors"].append(
+            dependency_message or "Unable to initialize pywin32 / Word support for .doc preprocessing."
+        )
+        report["failed_doc_files"] = [str(path.relative_to(source_dir)) for path in doc_files]
+        return report
 
-    # 初始化COM并启动Word应用
-    print(" 启动Word引擎...")
+    print(f"Found {len(doc_files)} .doc file(s) that need preprocessing.")
     pythoncom.CoInitialize()
     word_app = None
+    try:
+        try:
+            word_app = wc.Dispatch("Word.Application")
+            word_app.Visible = False
+            word_app.DisplayAlerts = False
+        except Exception as exc:
+            report["errors"].append(f"Unable to start Microsoft Word for .doc preprocessing: {exc}")
+            report["failed_doc_files"] = [str(path.relative_to(source_dir)) for path in doc_files]
+            return report
+
+        for index, doc_file in enumerate(doc_files, start=1):
+            relative_path = doc_file.relative_to(source_dir)
+            print(f"[{index}/{len(doc_files)}] Preprocessing .doc: {relative_path}")
+            output_path = doc_file.with_suffix(".docx")
+
+            if output_path.exists() and not force_overwrite:
+                message = f"{relative_path} (same-name .docx already exists)"
+                print(f"   Skipped: {message}")
+                report["skipped_existing_docx"].append(message)
+                continue
+
+            if convert_single_doc_optimized(word_app, str(doc_file), str(output_path)):
+                report["converted_doc_files"] += 1
+                backup_path = ensure_unique_path(
+                    build_backup_path(source_dir, doc_file, backup_dir_name=backup_dir_name)
+                )
+                try:
+                    backup_path.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.move(str(doc_file), str(backup_path))
+                    report["archived_doc_files"] += 1
+                    print(f"   Archived original .doc to: {backup_path.relative_to(source_dir)}")
+                except Exception as exc:
+                    report["archive_failed_doc_files"].append(
+                        f"{relative_path} -> {backup_path.relative_to(source_dir)} ({exc})"
+                    )
+                    print(f"   Converted to .docx, but failed to move original .doc: {exc}")
+            else:
+                report["failed_doc_files"].append(str(relative_path))
+
+    finally:
+        if word_app is not None:
+            try:
+                word_app.Quit()
+            except Exception:
+                pass
+        try:
+            pythoncom.CoUninitialize()
+        except Exception:
+            pass
+
+    return report
+
+
+def batch_convert_docs(input_folder, force_overwrite: bool = False) -> bool:
+    """
+    Standalone CLI behavior: recursively convert .doc files in the folder.
+    """
+    docs_folder = Path(input_folder)
+    if not docs_folder.exists():
+        print(f"Input folder does not exist: {docs_folder}")
+        return False
+
+    available, pythoncom, wc, dependency_message = check_win32com(allow_install=True)
+    if not available:
+        print(dependency_message)
+        return False
+
+    doc_files = iter_doc_files(
+        docs_folder,
+        recursive=True,
+        skip_backup=True,
+        backup_dir_name=BACKUP_DIR_NAME,
+    )
+    if not doc_files:
+        print("No .doc files found")
+        return True
+
+    backup_folder = docs_folder / BACKUP_DIR_NAME
+    backup_folder.mkdir(exist_ok=True)
+
+    pythoncom.CoInitialize()
+    word_app = None
+    success_count = 0
+    failed_files: List[str] = []
     try:
         word_app = wc.Dispatch("Word.Application")
         word_app.Visible = False
         word_app.DisplayAlerts = False
-        print(" Word引擎已就绪")
-    except Exception as e:
-        print(f" 无法启动Word应用程序: {e}")
-        pythoncom.CoUninitialize()
-        return False
 
-    # 开始转换
-    print(" 开始批量转换...")
+        for index, doc_file in enumerate(doc_files, start=1):
+            relative_path = doc_file.relative_to(docs_folder)
+            print(f"\n[{index}/{len(doc_files)}] Processing: {relative_path}")
+            output_path = doc_file.with_suffix(".docx")
+            if output_path.exists() and not force_overwrite:
+                print(f"   Target .docx already exists, skipping: {output_path.relative_to(docs_folder)}")
+                success_count += 1
+                continue
 
-    success_count = 0
-    failed_files = []
-
-    for i, doc_file in enumerate(unique_files, 1):
-        print(f"\n[{i}/{len(unique_files)}] 处理: {doc_file.name}")
-
-        # 检查输出文件是否已存在
-        output_path = doc_file.with_suffix('.docx')
-        if output_path.exists() and not force_overwrite:
-            print(f"    目标文件已存在，跳过: {output_path.name}")
-            success_count += 1
-            continue
-        elif output_path.exists() and force_overwrite:
-            print(f"   目标文件已存在，--force 参数启用，正在覆盖: {output_path.name}")
-
-        # 将word_app实例传递给转换函数
-        success = convert_single_doc_optimized(word_app, str(doc_file), str(output_path))
-
-        if success:
-            # 备份原始文件到backup文件夹
-            backup_path = backup_folder / doc_file.name
-            try:
-                if doc_file.exists():
-                    shutil.copy2(doc_file, backup_path)
-                    print(f"   已备份到backup文件夹")
-
-                # 删除原始.doc文件
+            if convert_single_doc_optimized(word_app, str(doc_file), str(output_path)):
+                backup_path = ensure_unique_path(
+                    build_backup_path(docs_folder, doc_file, backup_dir_name=BACKUP_DIR_NAME)
+                )
                 try:
-                    doc_file.unlink()
-                    print(f"    已删除原始文件")
-                except Exception as e:
-                    print(f"    无法删除原始文件: {e}")
-
+                    backup_path.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.move(str(doc_file), str(backup_path))
+                    print(f"   Archived original .doc to: {backup_path.relative_to(docs_folder)}")
+                except Exception as exc:
+                    print(f"   Converted to .docx, but failed to move original .doc: {exc}")
                 success_count += 1
-
-            except Exception as e:
-                print(f"    转换成功但备份/清理失败: {e}")
-                success_count += 1
-        else:
-            failed_files.append(f"{doc_file.name}")
-
-    # 在所有转换完成后，统一退出Word应用并反初始化COM
-    print("\n 正在关闭Word引擎...")
-    if word_app:
+            else:
+                failed_files.append(str(relative_path))
+    except Exception as exc:
+        print(f"Unable to start Microsoft Word: {exc}")
+        return False
+    finally:
+        if word_app is not None:
+            try:
+                word_app.Quit()
+            except Exception:
+                pass
         try:
-            word_app.Quit()
-            print(" Word引擎已关闭")
-        except Exception as e:
-            print(f"  关闭Word时出错: {e}")
-    try:
-        pythoncom.CoUninitialize()
-        print(" COM 组件已清理")
-    except Exception as e:
-        print(f"  清理COM时出错: {e}")
-    
-    # 显示统计信息
-    print("\n")
-    print(" 转换统计")
-    print(f" 成功转换: {success_count}/{len(unique_files)} 个文件")
+            pythoncom.CoUninitialize()
+        except Exception:
+            pass
 
+    print("\nConversion summary")
+    print(f"Successful conversions: {success_count}/{len(doc_files)}")
     if failed_files:
-        print(f" 转换失败: {len(failed_files)} 个文件")
+        print(f"Failed conversions: {len(failed_files)}")
         for filename in failed_files:
-            print(f"  - {filename}")
-
-        print("\n 对于转换失败的文件，可以尝试:")
-        print("  1.手动用Microsoft Word打开并另存为.docx格式")
-        print("  2.确保文件没有损坏")
-        print("  3.缩短文件名（建议少于50字符）")
+            print(f" - {filename}")
     else:
-        print(" 所有文件转换成功!")
-
-    # 检查转换结果
-    print("\n 转换结果检查:")
-
-    converted_files = list(docs_folder.glob("*.docx"))
-    remaining_doc_files = list(docs_folder.glob("*.doc"))
-
-    print(f"   {docs_folder}:")
-    print(f"    - .docx文件: {len(converted_files)} 个")
-    print(f"    - .doc文件: {len(remaining_doc_files)} 个 (不含backup)")
-
-    backup_files = list(backup_folder.glob("*.doc"))
-    print(f"   {backup_folder}:")
-    print(f"    - .doc文件备份: {len(backup_files)} 个")
-
+        print("All .doc files were handled successfully.")
     return success_count > 0
 
 
-def main():
-    """主函数"""
-    parser = argparse.ArgumentParser(description="批量转换.doc文件为.docx格式")
+def main() -> bool:
+    parser = argparse.ArgumentParser(description="Batch convert .doc files to .docx")
     parser.add_argument(
-        '-i', '--input',
+        "-i",
+        "--input",
         type=str,
-        default='./docs',
-        help='输入文件夹路径 (默认: ./docs)'
+        default="./docs",
+        help="Input folder path (default: ./docs)",
     )
     parser.add_argument(
-        '--force',
-        action='store_true',
-        help='强制覆盖已存在的.docx文件'
+        "--force",
+        action="store_true",
+        help="Overwrite an existing same-name .docx file",
     )
     args = parser.parse_args()
 
-    # 检查并请求管理员权限
     if not is_admin():
         request_admin_and_restart()
 
-    print("="*60)
-    print(".doc文件批量转换工具")
-    print("="*60)
+    print("=" * 60)
+    print(".doc batch conversion tool")
+    print("=" * 60)
 
-    # 显示当前文件夹结构
     docs_folder = Path(args.input)
-    if docs_folder.exists():
-        print(f"\n当前输入文件夹 '{docs_folder}' 内容:")
-        doc_count = 0
-        docx_count = 0
-        for item in docs_folder.iterdir():
-            if item.is_file():
-                if item.suffix.lower() == '.doc':
-                    print(f"   {item.name}")
-                    doc_count += 1
-                elif item.suffix.lower() == '.docx':
-                    print(f"   {item.name} (已转换)")
-                    docx_count += 1
-
-        if doc_count == 0:
-            print("   没有发现.doc文件，无需转换")
-            if docx_count > 0:
-                print(f"   已有 {docx_count} 个.docx文件。")
-            input("\n按回车键退出...")
-            return True
-    else:
-        print(f" 输入文件夹不存在: {docs_folder}")
-        input("\n按回车键退出...")
+    if not docs_folder.exists():
+        print(f"Input folder does not exist: {docs_folder}")
+        input("\nPress Enter to exit...")
         return False
 
+    print(f"\nCurrent input folder: {docs_folder}")
+    recursive_docs = iter_doc_files(docs_folder, recursive=True, skip_backup=True)
+    if not recursive_docs:
+        print("No .doc files were found in the folder or its subfolders. Nothing to convert.")
+        input("\nPress Enter to exit...")
+        return True
+
+    print(f"Found {len(recursive_docs)} .doc file(s) in the folder tree.")
+
     try:
-        # 执行批量转换
         start_time = time.time()
-        print(f"\n开始自动转换...")
-        if args.force:
-            print(f"注意: --force 模式已启用，将覆盖已存在的.docx文件。")
         success = batch_convert_docs(args.input, args.force)
-        end_time = time.time()
-
-        print(f"\n  转换耗时: {end_time - start_time:.2f}秒")
-
+        elapsed = time.time() - start_time
+        print(f"\nElapsed time: {elapsed:.2f}s")
         if success:
-            print("\n 转换完成！现在可以正常运行主程序")
+            print("\nConversion finished. You can now run the main program.")
         else:
-            print("\n  转换过程中出现错误，请检查上方日志")
-
+            print("\nConversion completed with errors. Please review the log above.")
     except KeyboardInterrupt:
-        print("\n\n  用户中断操作")
+        print("\n\nOperation interrupted by user")
         success = False
-    except Exception as e:
-        print(f"\n 发生错误: {str(e)}")
-        print("\n详细错误信息:")
+    except Exception as exc:
+        print(f"\nUnexpected error: {exc}")
         traceback.print_exc()
         success = False
 
-    input("\n按回车键退出...")
+    input("\nPress Enter to exit...")
     return success
 
 

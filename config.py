@@ -18,12 +18,15 @@ DB_PATH = Path("knowledge_base.db")       # 知识库数据库文件
 DOC_DIR = Path("docs")                    # 知识库文档目录
 FAISS_INDEX_FILE = Path("faiss_index.bin")      # 存储FAISS索引的文件
 METADATA_FILE = Path("metadata.json")           # 存储向量对应的元数据 (ID, path, chunk_index, content)
+CONVERSATION_STATE_FILE = Path("conversation_state.json") # 当前单窗口会话的持久化文件
 
 #RAG逻辑
 DEFAULT_TOP_K = 5 # 检索Top-K个片段，为压缩提供更多素材
 DEFAULT_TOP_K_COMPRESSED = 3 # 压缩后最终使用的片段数
 DEFAULT_THRESHOLD = 0.3 # 默认相似度阈值
 MIN_RETRIEVE_KEEP = 2 # 阈值过滤后至少保留的检索结果数量
+RECENT_HISTORY_TOKEN_BUDGET = 600 # 多轮对话中原样保留的最近历史token预算
+HISTORY_SUMMARY_TRIGGER_TOKENS = 240 # 超过该预算的较旧历史会先压缩再参与问答
 
 #构建阶段
 BATCH_SIZE_DOCS = 10 # 每次处理的文档数量，可根据内存情况调整

@@ -89,7 +89,7 @@ class RAGHelpers:
             try:
                 with open(cache_file_path, "r", encoding="utf-8") as file:
                     cache_data = json.load(file)
-                logger.info(
+                logger.debug(
                     f"Loaded {len(cache_data)} embedding cache entries from {cache_file_path}"
                 )
                 return cache_data
@@ -225,7 +225,7 @@ class RAGHelpers:
             index = faiss.read_index(str(faiss_file))
             with open(metadata_file, "r", encoding="utf-8") as file:
                 metadata = json.load(file)
-        logger.info(
+        logger.debug(
             f"Loaded FAISS index and metadata map: dimension={index.d}, total={index.ntotal}"
         )
         return index, metadata
