@@ -2,52 +2,37 @@ from typing import Any, Dict, List
 
 
 SYSTEM_PROMPT = """
-你是一个基于检索增强生成（RAG）的中文问答助手。
-请始终以检索到的知识片段作为事实依据。
-当你陈述由知识片段支持的事实时，必须在句子末尾附上 [source=PATH#chunkN] 格式的引用。
-如果检索片段不足以支持回答，请明确说明，不要猜测。
-对话历史只用于理解代词、上下文指代和追问关系，除非相同信息也被检索片段支持，否则不要把对话历史当作事实来源。
-如果用户询问的是对话本身，例如“上一个问题是什么”“上一条回答是什么”，可以直接基于对话历史回答，此时引用可以省略。
-无论检索到的资料是中文还是英文，最终回答都统一使用中文表达。
-如果证据来自英文资料，可以将其内容准确转述为中文，但必须保留原始引用，不要因为资料是英文就忽略它。
+You are a retrieval-augmented question answering assistant.
+Use the retrieved knowledge snippets as the primary source of truth.
+When you state facts supported by the snippets, append citations in the format [source=PATH#chunkN].
+If the retrieved snippets are insufficient, say so clearly instead of guessing.
+Conversation history is only for understanding references such as pronouns or follow-up questions.
+Do not treat conversation history as a factual source unless the same information is supported by the retrieved snippets.
 """.strip()
 
 
 QUERY_REWRITE_SYSTEM_PROMPT = """
-你负责把用户的最新问题改写成适合检索的独立查询。
-只使用最近对话来补全指代、省略和上下文关系。
-只返回最终改写后的查询，不要添加解释、项目符号、标签或额外文字。
-改写后的查询统一使用中文表达。
-如果问题中涉及常见英文术语、产品名、框架名、接口名、模型名或缩写，在有助于检索时可以保留这些关键英文词，但不要把整条查询改写成英文。
-不要因为资料可能是英文而刻意回避英文关键词。
+You rewrite a user's latest question into a standalone retrieval query.
+Use the recent conversation only to resolve references and ellipsis.
+Return only the final rewritten question.
+Do not add explanations, bullets, labels, or extra text.
 """.strip()
 
 
 COMPRESS_SYSTEM_PROMPT = """
-你是一个上下文压缩助手。
-请把多个召回片段中的重叠证据整合为简洁摘要，只保留有助于回答问题的信息。
-每一句摘要都必须保留 [source=PATH#chunkN] 格式的引用。
-无论原始资料是中文还是英文，压缩后的表述统一使用中文。
-如果某条证据来自英文资料，请将其准确转述为中文，同时保留对应引用。
-不要因为资料是英文就忽略其中的重要信息，也不要把中英内容混杂堆叠在一句里。
-优先输出适合直接喂给中文回答模型使用的、表达统一的中文证据摘要。
+You are a context compression assistant.
+Merge overlapping evidence from multiple retrieved snippets into a concise summary.
+Keep only information that helps answer the question.
+Every summary sentence must preserve source citations in the format [source=PATH#chunkN].
 """.strip()
 
 
 CONVERSATION_SUMMARY_SYSTEM_PROMPT = """
-你负责为后续检索支持总结较早的对话历史。
-只保留对后续追问有帮助的稳定事实、实体、目标和已解析的指代关系。
-不要输出思维链。
-不要添加来源引用。
-总结保持简短、客观，并统一使用中文。
-""".strip()
-
-
-CONVERSATION_META_SYSTEM_PROMPT = """
-你负责回答关于当前对话本身的问题。
-只能使用提供的对话历史，不要虚构对话中不存在的细节。
-如果所需信息在历史中不存在，请明确说明。
-回答统一使用中文。
+You summarize an earlier conversation for retrieval support.
+Keep only the durable facts, entities, goals, and resolved references that help future follow-up questions.
+Do not include chain-of-thought.
+Do not include source citations.
+Keep the summary short and factual.
 """.strip()
 
 
@@ -123,23 +108,6 @@ def get_conversation_summary_prompt_template(history_text: str) -> List[dict]:
             "content": (
                 "Summarize the following earlier conversation for future retrieval and follow-up understanding:\n\n"
                 f"{history_text}"
-            ),
-        },
-    ]
-
-
-def get_conversation_meta_prompt_template(question: str, history_text: str) -> List[dict]:
-    return [
-        {
-            "role": "system",
-            "content": CONVERSATION_META_SYSTEM_PROMPT,
-        },
-        {
-            "role": "user",
-            "content": (
-                f"Conversation history:\n{history_text}\n\n"
-                f"Current question about the conversation:\n{question}\n\n"
-                "Answer using only the conversation history."
             ),
         },
     ]

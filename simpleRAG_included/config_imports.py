@@ -17,7 +17,6 @@ from config import (
     DOC_DIR,
     FAISS_INDEX_FILE,
     METADATA_FILE,
-    CONVERSATION_STATE_FILE,
     # Build
     BATCH_SIZE_DOCS,
     CHUNK_SIZE_DEFAULT,
@@ -32,29 +31,10 @@ from config import (
     DEFAULT_TOP_K_COMPRESSED,
     DEFAULT_THRESHOLD,
     MIN_RETRIEVE_KEEP,
-    RECENT_HISTORY_TOKEN_BUDGET,
-    HISTORY_SUMMARY_TRIGGER_TOKENS,
     OLLAMA_CHAT_TEMPERATURE_DEFAULT,
     OLLAMA_COMPRESSOR_TEMPERATURE_DEFAULT,
 )
 
 # --- 配置日志 ---
-logger = logging.getLogger("lightweightrag")
-if not logger.handlers:
-    handler = logging.StreamHandler()
-    handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
-    logger.addHandler(handler)
-logger.setLevel(logging.INFO)
-logger.propagate = False
-
-for noisy_logger_name in (
-    "httpx",
-    "httpcore",
-    "urllib3",
-    "gradio",
-    "gradio.analytics",
-    "gradio.networking",
-    "faiss",
-    "faiss.loader",
-):
-    logging.getLogger(noisy_logger_name).setLevel(logging.WARNING)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)

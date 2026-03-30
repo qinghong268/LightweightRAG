@@ -1,6 +1,5 @@
 docx2txt
 faiss-cpu
-FlagEmbedding
 gradio
 langchain-community
 langchain-core
