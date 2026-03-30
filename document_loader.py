@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 from typing import List
 
@@ -28,11 +29,21 @@ TEXT_FALLBACK_ENCODINGS = (
     "gb2312",
 )
 MAX_UNSUPPORTED_LOG_EXAMPLES = 10
+SKIPPED_DIRECTORY_NAMES = {"backup"}
 
 
 def _iter_files(folder: Path) -> List[Path]:
+    discovered_files: List[Path] = []
+    for current_root, dir_names, file_names in os.walk(folder):
+        dir_names[:] = [
+            name for name in dir_names if name.lower() not in SKIPPED_DIRECTORY_NAMES
+        ]
+        root_path = Path(current_root)
+        for file_name in file_names:
+            discovered_files.append(root_path / file_name)
+
     return sorted(
-        (path for path in folder.rglob("*") if path.is_file()),
+        (path for path in discovered_files if path.is_file()),
         key=lambda path: str(path.relative_to(folder)).lower(),
     )
 
