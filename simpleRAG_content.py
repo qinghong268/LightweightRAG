@@ -1,3 +1,4 @@
+import copy
 import hashlib
 import json
 import re
@@ -41,12 +42,15 @@ class SimpleRAG:
     RECENT_HISTORY_TURNS = 3
     SUMMARY_TRIGGER_TURNS = 5
     SUMMARY_CACHE_MAX_ITEMS = 128
+    QUERY_CACHE_MAX_ITEMS = 64
 
     def __init__(self):
         logger.info("Initializing SimpleRAG instance")
 
         self.cache = {}
         self._summary_cache: "OrderedDict[str, str]" = OrderedDict()
+        self._query_cache: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
+        self._last_build_report: Dict[str, Any] = {}
         if CACHE_FILE.exists():
             try:
                 raw_cache = RAGHelpers.load_embedding_cache(CACHE_FILE)
@@ -91,7 +95,7 @@ class SimpleRAG:
         source_dir: Path,
         chunk_size: int = None,
         overlap: int = None,
-    ) -> None:
+    ) -> Dict[str, Any]:
         from simpleRAG_included.config_imports import CHUNK_OVERLAP_DEFAULT, CHUNK_SIZE_DEFAULT
 
         if chunk_size is None:
@@ -100,16 +104,31 @@ class SimpleRAG:
             overlap = CHUNK_OVERLAP_DEFAULT
 
         self.cache["__model_name__"] = EMBEDDING_MODEL
-        await self._builder.build_knowledge_base_async(source_dir, chunk_size, overlap)
+        build_report = await self._builder.build_knowledge_base_async(source_dir, chunk_size, overlap)
 
         save_cache = {key: value for key, value in self.cache.items() if key != "__model_name__"}
         save_cache["__model_name__"] = EMBEDDING_MODEL
         RAGHelpers.save_embedding_cache(save_cache, CACHE_FILE)
+        self._last_build_report = build_report
+        self._clear_query_cache()
         logger.info("Knowledge base build finished")
+        return build_report
 
-    def _debug_event(self, event: str, content: str) -> str:
+    def _debug_event(self, event: str, content: Any) -> str:
         payload = {"event": event, "content": content}
         return f"{self.DEBUG_LOG_PREFIX}{json.dumps(payload, ensure_ascii=False)}"
+
+    def _clear_query_cache(self) -> None:
+        self._query_cache.clear()
+
+    def get_last_build_report(self) -> Dict[str, Any]:
+        return copy.deepcopy(self._last_build_report)
+
+    def get_runtime_cache_metrics(self) -> Dict[str, int]:
+        return {
+            "query_cache_entries": len(self._query_cache),
+            "summary_cache_entries": len(self._summary_cache),
+        }
 
     def _normalize_history(
         self,
@@ -157,6 +176,49 @@ class SimpleRAG:
             if content:
                 lines.append(f"{role_label}: {content}")
         return "\n".join(lines)
+
+    def _get_snapshot_fingerprint(self) -> str:
+        parts = []
+        for path_obj in (FAISS_INDEX_FILE, METADATA_FILE):
+            if path_obj.exists():
+                stat = path_obj.stat()
+                parts.append(f"{path_obj.name}:{stat.st_mtime_ns}:{stat.st_size}")
+            else:
+                parts.append(f"{path_obj.name}:missing")
+        return "|".join(parts)
+
+    def _build_query_cache_key(
+        self,
+        question: str,
+        history: List[Dict[str, Any]],
+        top_k_retrieve: int,
+        top_k_compressed: int,
+        score_threshold: float,
+    ) -> str:
+        normalized_history = self._normalize_history(history, max_turns=None)
+        cache_payload = {
+            "question": question.strip(),
+            "history": self._history_messages_to_text(normalized_history),
+            "top_k_retrieve": int(top_k_retrieve),
+            "top_k_compressed": int(top_k_compressed),
+            "score_threshold": round(float(score_threshold), 4),
+            "snapshot": self._get_snapshot_fingerprint(),
+        }
+        serialized = json.dumps(cache_payload, ensure_ascii=False, sort_keys=True)
+        return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+    def _get_cached_query_entry(self, cache_key: str) -> Dict[str, Any]:
+        cached = self._query_cache.get(cache_key)
+        if cached is None:
+            return {}
+        self._query_cache.move_to_end(cache_key)
+        return copy.deepcopy(cached)
+
+    def _store_query_entry(self, cache_key: str, payload: Dict[str, Any]) -> None:
+        self._query_cache[cache_key] = copy.deepcopy(payload)
+        self._query_cache.move_to_end(cache_key)
+        while len(self._query_cache) > self.QUERY_CACHE_MAX_ITEMS:
+            self._query_cache.popitem(last=False)
 
     def _should_skip_rewrite(
         self,
@@ -408,6 +470,17 @@ class SimpleRAG:
         history: List[Dict[str, Any]] = None,
     ) -> str:
         conversation_state = self._prepare_conversation_state(question, history)
+        cache_key = self._build_query_cache_key(
+            question,
+            history or [],
+            top_k_retrieve,
+            top_k_compressed,
+            score_threshold,
+        )
+        cached_entry = self._get_cached_query_entry(cache_key)
+        if cached_entry:
+            return str(cached_entry.get("answer", ""))
+
         try:
             retrieved_results = self.retrieve_contexts(
                 question,
@@ -428,9 +501,11 @@ class SimpleRAG:
             top_k=top_k_compressed,
         )
         compressed_context = self.compress_contexts(reranked_results)
+        compression_fallback_used = False
         if not self._validate_citations(compressed_context, reranked_results):
             logger.warning("Compressed context failed citation validation; falling back to raw context")
             compressed_context = self._build_raw_context(reranked_results)
+            compression_fallback_used = True
 
         messages = self.prepare_final_prompt(
             question,
@@ -444,10 +519,35 @@ class SimpleRAG:
             model_name=self._chat_model,
             temperature=OLLAMA_CHAT_TEMPERATURE_DEFAULT,
         )
+        citation_retry_used = False
         if self._validate_citations(answer, reranked_results):
+            self._store_query_entry(
+                cache_key,
+                {
+                    "answer": answer,
+                    "conversation_state": {
+                        "summary_used": conversation_state["summary_used"],
+                        "summary_text": conversation_state["summary_text"],
+                        "recent_history_text": conversation_state["recent_history_text"],
+                        "retrieval_history_text": conversation_state["retrieval_history_text"],
+                        "rewrite_skipped": conversation_state["rewrite_skipped"],
+                        "rewritten_query": conversation_state["rewritten_query"],
+                        "history_message_count": len(conversation_state["normalized_history"]),
+                    },
+                    "retrieved_results": retrieved_results,
+                    "reranked_results": reranked_results,
+                    "diagnostics": {
+                        "reranker_status": self._querier.get_reranker_status(),
+                        "retrieval_fallback_used": bool(retrieved_results and len(retrieved_results) < MIN_RETRIEVE_KEEP),
+                        "citation_retry_used": citation_retry_used,
+                        "compression_fallback_used": compression_fallback_used,
+                    },
+                },
+            )
             return answer
 
         logger.warning("Answer citation validation failed; retrying with raw context")
+        citation_retry_used = True
         raw_context = self._build_raw_context(reranked_results)
         fallback_messages = self.prepare_final_prompt(
             question,
@@ -455,12 +555,36 @@ class SimpleRAG:
             raw_context,
             history_text=conversation_state["retrieval_history_text"],
         )
-        return RAGHelpers._chat_completion(
+        fallback_answer = RAGHelpers._chat_completion(
             self._ollama_host,
             fallback_messages,
             model_name=self._chat_model,
             temperature=OLLAMA_CHAT_TEMPERATURE_DEFAULT,
         )
+        self._store_query_entry(
+            cache_key,
+            {
+                "answer": fallback_answer,
+                "conversation_state": {
+                    "summary_used": conversation_state["summary_used"],
+                    "summary_text": conversation_state["summary_text"],
+                    "recent_history_text": conversation_state["recent_history_text"],
+                    "retrieval_history_text": conversation_state["retrieval_history_text"],
+                    "rewrite_skipped": conversation_state["rewrite_skipped"],
+                    "rewritten_query": conversation_state["rewritten_query"],
+                    "history_message_count": len(conversation_state["normalized_history"]),
+                },
+                "retrieved_results": retrieved_results,
+                "reranked_results": reranked_results,
+                "diagnostics": {
+                    "reranker_status": self._querier.get_reranker_status(),
+                    "retrieval_fallback_used": bool(retrieved_results and len(retrieved_results) < MIN_RETRIEVE_KEEP),
+                    "citation_retry_used": citation_retry_used,
+                    "compression_fallback_used": compression_fallback_used,
+                },
+            },
+        )
+        return fallback_answer
 
     def answer_question_stream(
         self,
@@ -478,19 +602,82 @@ class SimpleRAG:
         try:
             fallback_retrieval_used = False
             citation_retry_used = False
+            compression_fallback_used = False
 
             if not FAISS_INDEX_FILE.exists() or not METADATA_FILE.exists():
                 yield "Knowledge base is empty or failed to load.\n"
                 return
 
             conversation_state = self._prepare_conversation_state(question, history)
+            cache_key = self._build_query_cache_key(
+                question,
+                history or [],
+                top_k_retrieve,
+                top_k_compressed,
+                score_threshold,
+            )
+            cached_entry = self._get_cached_query_entry(cache_key)
+            yield self._debug_event(
+                "cache_status",
+                {
+                    "hit": bool(cached_entry),
+                    "entries": len(self._query_cache),
+                },
+            )
+            if cached_entry:
+                cached_state = cached_entry.get("conversation_state", {})
+                cached_diagnostics = cached_entry.get("diagnostics", {})
+                yield self._debug_event(
+                    "history_mode",
+                    {
+                        "summary_used": bool(cached_state.get("summary_used")),
+                        "history_messages": int(cached_state.get("history_message_count", 0)),
+                        "recent_turns": self.RECENT_HISTORY_TURNS,
+                    },
+                )
+                if cached_state.get("summary_text"):
+                    yield self._debug_event("history_summary", cached_state["summary_text"])
+                if cached_state.get("recent_history_text"):
+                    yield self._debug_event("retrieval_history", cached_state["recent_history_text"])
+                yield "Step 0: interpret conversation and rewrite the query\n"
+                yield self._debug_event(
+                    "rewrite_mode",
+                    "skipped" if cached_state.get("rewrite_skipped") else "used",
+                )
+                yield f"Original question: {question}\n"
+                yield f"Rewritten query: {cached_state.get('rewritten_query', question)}\n\n"
+                yield self._debug_event(
+                    "rewritten_query",
+                    cached_state.get("rewritten_query", question),
+                )
+                yield "Step 1: reuse cached response package\n"
+                yield "Cache hit: reused retrieval, ranking, and answer synthesis outputs.\n"
+                yield self._debug_event(
+                    "retrieved_results",
+                    cached_entry.get("retrieved_results", []),
+                )
+                yield self._debug_event(
+                    "reranked_results",
+                    cached_entry.get("reranked_results", []),
+                )
+                if cached_diagnostics.get("compression_fallback_used"):
+                    yield "Compressed context failed citation validation; falling back to raw context.\n"
+                yield "\nFinal answer\n"
+                yield str(cached_entry.get("answer", ""))
+                yield (
+                    f"\n\nDiagnostics: reranker={cached_diagnostics.get('reranker_status', 'unknown')}, "
+                    f"retrieval_fallback={bool(cached_diagnostics.get('retrieval_fallback_used'))}, "
+                    f"citation_retry={bool(cached_diagnostics.get('citation_retry_used'))}\n"
+                )
+                return
+
             yield self._debug_event(
                 "history_mode",
-                (
-                    f"summary_used={conversation_state['summary_used']}, "
-                    f"history_messages={len(conversation_state['normalized_history'])}, "
-                    f"recent_turns={self.RECENT_HISTORY_TURNS}"
-                ),
+                {
+                    "summary_used": conversation_state["summary_used"],
+                    "history_messages": len(conversation_state["normalized_history"]),
+                    "recent_turns": self.RECENT_HISTORY_TURNS,
+                },
             )
             if conversation_state["summary_text"]:
                 yield self._debug_event("history_summary", conversation_state["summary_text"])
@@ -529,6 +716,19 @@ class SimpleRAG:
                 yield "No relevant knowledge snippets were found.\n"
                 return
 
+            yield self._debug_event(
+                "retrieved_results",
+                [
+                    {
+                        "score": round(item["score"], 4),
+                        "path": item["path"],
+                        "chunk_index": item["chunk_index"],
+                        "content": item["content"][:500],
+                    }
+                    for item in retrieved_results
+                ],
+            )
+
             for index_id, item in enumerate(retrieved_results[:3], start=1):
                 yield (
                     f"[Top{index_id}] similarity={item['score']:.4f}\n"
@@ -542,6 +742,19 @@ class SimpleRAG:
                 conversation_state["rewritten_query"],
                 retrieved_results,
                 top_k=top_k_compressed,
+            )
+            yield self._debug_event(
+                "reranked_results",
+                [
+                    {
+                        "score": round(item.get("score", 0.0), 4),
+                        "rerank_score": round(item.get("rerank_score", 0.0), 4),
+                        "path": item["path"],
+                        "chunk_index": item["chunk_index"],
+                        "content": item["content"][:500],
+                    }
+                    for item in reranked_results
+                ],
             )
             reranker_status = self._querier.get_reranker_status()
             yield f"Reranker status: {reranker_status}\n"
@@ -570,6 +783,7 @@ class SimpleRAG:
             if not self._validate_citations(compressed_content, reranked_results):
                 yield "Compressed context failed citation validation; falling back to raw context.\n"
                 compressed_content = self._build_raw_context(reranked_results)
+                compression_fallback_used = True
             yield f"Compression model: {self._compressor_model}\n"
             yield f"Compressed context:\n{compressed_content}\nCompression complete\n\n"
 
@@ -608,13 +822,57 @@ class SimpleRAG:
                     raw_context,
                     history_text=conversation_state["retrieval_history_text"],
                 )
+                fallback_answer = ""
                 for token in RAGHelpers._chat_completion_stream(
                     self._ollama_host,
                     fallback_messages,
                     model_name=self._chat_model,
                     temperature=OLLAMA_CHAT_TEMPERATURE_DEFAULT,
                 ):
+                    fallback_answer += token
                     yield token
+                full_answer = fallback_answer
+
+            self._store_query_entry(
+                cache_key,
+                {
+                    "answer": full_answer,
+                    "conversation_state": {
+                        "summary_used": conversation_state["summary_used"],
+                        "summary_text": conversation_state["summary_text"],
+                        "recent_history_text": conversation_state["recent_history_text"],
+                        "retrieval_history_text": conversation_state["retrieval_history_text"],
+                        "rewrite_skipped": conversation_state["rewrite_skipped"],
+                        "rewritten_query": conversation_state["rewritten_query"],
+                        "history_message_count": len(conversation_state["normalized_history"]),
+                    },
+                    "retrieved_results": [
+                        {
+                            "score": round(item["score"], 4),
+                            "path": item["path"],
+                            "chunk_index": item["chunk_index"],
+                            "content": item["content"][:500],
+                        }
+                        for item in retrieved_results
+                    ],
+                    "reranked_results": [
+                        {
+                            "score": round(item.get("score", 0.0), 4),
+                            "rerank_score": round(item.get("rerank_score", 0.0), 4),
+                            "path": item["path"],
+                            "chunk_index": item["chunk_index"],
+                            "content": item["content"][:500],
+                        }
+                        for item in reranked_results
+                    ],
+                    "diagnostics": {
+                        "reranker_status": self._querier.get_reranker_status(),
+                        "retrieval_fallback_used": fallback_retrieval_used,
+                        "citation_retry_used": citation_retry_used,
+                        "compression_fallback_used": compression_fallback_used,
+                    },
+                },
+            )
 
             yield (
                 f"\n\nDiagnostics: reranker={self._querier.get_reranker_status()}, "

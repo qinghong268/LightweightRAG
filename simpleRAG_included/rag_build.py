@@ -159,7 +159,7 @@ class RAGBuilder:
         source_dir: Path,
         chunk_size: int = None,
         overlap: int = None,
-    ) -> None:
+    ) -> Dict[str, Any]:
         start_time = time.time()
         logger.info(f"Start building knowledge base from {source_dir}")
 
@@ -173,22 +173,35 @@ class RAGBuilder:
 
         grouped_sources = self._load_documents_grouped_by_source(source_dir)
         current_paths = {path for path, _ in grouped_sources}
+        discovered_documents = len(grouped_sources)
+        empty_documents = 0
 
         conn = sqlite3.connect(DB_PATH)
         temp_faiss_file = FAISS_INDEX_FILE.with_suffix(f"{FAISS_INDEX_FILE.suffix}.tmp")
         temp_metadata_file = METADATA_FILE.with_suffix(f"{METADATA_FILE.suffix}.tmp")
         final_total = 0
+        total_added = 0
+        new_paths = set()
+        refreshed_paths = set()
+        stale_paths = set()
         try:
             RAGHelpers.ensure_schema(conn)
             conn.execute("BEGIN IMMEDIATE")
 
             existing_metadata = RAGHelpers.get_all_metadata(conn)
             existing_paths = {item["path"] for item in existing_metadata}
-            stale_paths = {
+            existing_source_paths = {
                 path
                 for path in existing_paths
-                if self._path_belongs_to_source_dir(path, source_dir) and path not in current_paths
+                if self._path_belongs_to_source_dir(path, source_dir)
             }
+            stale_paths = {
+                path
+                for path in existing_source_paths
+                if path not in current_paths
+            }
+            new_paths = current_paths - existing_source_paths
+            refreshed_paths = current_paths & existing_source_paths
             paths_to_replace = sorted(current_paths | stale_paths)
 
             if paths_to_replace:
@@ -196,13 +209,13 @@ class RAGBuilder:
                 logger.info(f"Removed stale metadata for {len(paths_to_replace)} source files")
 
             next_chunk_id = RAGHelpers.get_max_chunk_id(conn) + 1
-            total_added = 0
 
             for file_index, (source_path, texts) in enumerate(grouped_sources, start=1):
                 logger.info(f"Syncing document {file_index}/{len(grouped_sources)}: {source_path}")
                 chunks = self._split_source_texts(texts)
                 if not chunks:
                     logger.info(f"Skipped empty document after splitting: {source_path}")
+                    empty_documents += 1
                     continue
 
                 chunk_hashes = [
@@ -261,3 +274,16 @@ class RAGBuilder:
         logger.info(
             f"Knowledge base sync finished in {elapsed:.2f}s, rebuilt total chunks={final_total}, newly written chunks={total_added}"
         )
+        return {
+            "source_dir": str(source_dir.resolve(strict=False)),
+            "discovered_documents": discovered_documents,
+            "active_documents": len(current_paths),
+            "new_documents": len(new_paths),
+            "refreshed_documents": len(refreshed_paths),
+            "removed_documents": len(stale_paths),
+            "empty_documents": empty_documents,
+            "written_chunks": total_added,
+            "total_chunks": final_total,
+            "duration_seconds": round(elapsed, 2),
+            "snapshot_status": "cleared" if final_total == 0 else "updated",
+        }
