@@ -5,6 +5,8 @@
 
 from pathlib import Path
 
+BASE_DIR = Path(__file__).resolve().parent
+
 #Ollama服务
 OLLAMA_HOST = "http://localhost:11434"
 CHAT_MODEL = "deepseek-r1:8b"  # 用于最终回答生成的本地模型
@@ -13,12 +15,12 @@ EMBEDDING_MODEL = "bge-m3" # 用于知识库文档索引的本地模型
 RERANK_MODEL = "bge-reranker-v2-m3" # 用于检索结果重排序的模型
 
 #文件路径
-CACHE_FILE = Path("embedding_cache.json") # 用于存储嵌入向量的缓存文件
-DB_PATH = Path("knowledge_base.db")       # 知识库数据库文件
-DOC_DIR = Path("docs")                    # 知识库文档目录
-FAISS_INDEX_FILE = Path("faiss_index.bin")      # 存储FAISS索引的文件
-METADATA_FILE = Path("metadata.json")           # 存储向量对应的元数据 (ID, path, chunk_index, content)
-CONVERSATION_STATE_FILE = Path("conversation_state.json") # 当前单窗口会话的持久化文件
+CACHE_FILE = BASE_DIR / "embedding_cache.json"  # 用于存储嵌入向量的缓存文件
+DB_PATH = BASE_DIR / "knowledge_base.db"        # 知识库数据库文件
+DOC_DIR = BASE_DIR / "docs"                     # 知识库文档目录
+FAISS_INDEX_FILE = BASE_DIR / "faiss_index.bin" # 存储FAISS索引的文件
+METADATA_FILE = BASE_DIR / "metadata.json"      # 存储向量对应的元数据 (ID, path, chunk_index, content)
+CONVERSATION_STATE_FILE = BASE_DIR / "conversation_state.json" # 当前单窗口会话的持久化文件
 
 #RAG逻辑
 DEFAULT_TOP_K = 5 # 检索Top-K个片段，为压缩提供更多素材
@@ -34,7 +36,7 @@ CHUNK_SIZE_DEFAULT = 220 # 文档切片的默认长度
 CHUNK_OVERLAP_DEFAULT = 40 # 文档切片的默认重叠长度
 
 #文本分割器
-LOCAL_EMBEDDING_MODEL_PATH = "./models/bge-m3"
+LOCAL_EMBEDDING_MODEL_PATH = str(BASE_DIR / "models" / "bge-m3")
 SEMANTIC_SPLITTER_MODEL_NAME = "BAAI/bge-m3"
 SEMANTIC_SPLITTER_THRESHOLD = 0.85
 SEMANTIC_SPLITTER_SEPARATORS = ["\n\n", "\n", "。", "？", "！", "；", "?", "!", ";", "..."]

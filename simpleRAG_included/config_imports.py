@@ -51,9 +51,6 @@ for noisy_logger_name in (
     "httpx",
     "httpcore",
     "urllib3",
-    "gradio",
-    "gradio.analytics",
-    "gradio.networking",
     "faiss",
     "faiss.loader",
 ):

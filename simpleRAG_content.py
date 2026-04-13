@@ -1,13 +1,18 @@
-import copy
+﻿import copy
 import hashlib
 import json
 import math
 import re
+import warnings
 from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Dict, Iterable, List
 
 import numpy as np
+warnings.filterwarnings(
+    "ignore",
+    message=r".*doesn't match a supported version.*",
+)
 import requests
 import torch
 from sentence_transformers import SentenceTransformer
@@ -38,6 +43,8 @@ from simpleRAG_included.rag_exceptions import SnapshotLoadError
 from simpleRAG_included.rag_helpers import RAGHelpers
 from simpleRAG_included.rag_query import RAGQuerier
 
+PROJECT_ROOT = Path(__file__).resolve().parent
+
 
 NON_PERSISTENT_ASSISTANT_PREFIXES = (
     "[System Error]:",
@@ -50,6 +57,11 @@ NON_PERSISTENT_ASSISTANT_PREFIXES = (
     "正在检索并推理...",
     "Compressing retrieved context",
     "开始压缩召回上下文",
+    "Skipping context compression",
+    "Retrieval context prepared:",
+    "Retrieval query:",
+    "跳过召回上下文压缩",
+    "用于生成的上下文长度：",
     "Start retrieval",
     "开始检索流程",
     "Step 0:",
@@ -113,13 +125,13 @@ def localize_runtime_status(status: str) -> str:
         "not_loaded": "未加载",
         "unavailable": "不可用",
         "skipped_conversation_only": "仅对话历史",
+        "skipped_intent_router": "意图路由直答",
         "unknown": "未知",
     }
     return status_map.get(str(status or "").strip(), str(status or "未知"))
 
 
 class SimpleRAG:
-    ANSWER_REPLACE_MARKER = "__RAG_REPLACE_ANSWER__"
     DEBUG_LOG_PREFIX = "__RAG_DEBUG__"
     SUMMARY_CACHE_MAX_ITEMS = 128
     QUERY_CACHE_MAX_ITEMS = 64
@@ -198,6 +210,27 @@ class SimpleRAG:
     def _debug_event(self, event: str, content: Any) -> str:
         payload = {"event": event, "content": content}
         return f"{self.DEBUG_LOG_PREFIX}{json.dumps(payload, ensure_ascii=False)}"
+
+    def _to_project_relative_path(self, path_value: Any) -> str:
+        raw_text = str(path_value or "").strip()
+        if not raw_text:
+            return ""
+        try:
+            candidate = Path(raw_text)
+            if candidate.is_absolute():
+                resolved = candidate.resolve()
+            else:
+                resolved = (PROJECT_ROOT / candidate).resolve()
+            try:
+                return resolved.relative_to(PROJECT_ROOT).as_posix()
+            except ValueError:
+                return resolved.name or raw_text.replace("\\", "/")
+        except Exception:
+            return raw_text.replace("\\", "/")
+
+    def _format_source_chunk(self, path_value: Any, chunk_index: Any) -> str:
+        rel_path = self._to_project_relative_path(path_value)
+        return f"{rel_path}#chunk{chunk_index}"
 
     def _clear_query_cache(self) -> None:
         self._query_cache.clear()
@@ -359,31 +392,8 @@ class SimpleRAG:
         if not history_text:
             return ""
 
-        cache_key = hashlib.sha256(history_text.encode("utf-8")).hexdigest()
-        cached = self._summary_cache.get(cache_key)
-        if cached is not None:
-            self._summary_cache.move_to_end(cache_key)
-            return cached
-
-        messages = prompts.get_conversation_summary_prompt_template(history_text)
-        try:
-            summary = RAGHelpers._chat_completion(
-                self._ollama_host,
-                messages,
-                model_name=self._compressor_model,
-                temperature=0.1,
-            ).strip()
-        except Exception as exc:
-            logger.warning(f"Conversation summary generation failed: {exc}")
-            summary = ""
-
-        summary = self._sanitize_history_content(summary)
-        if summary:
-            self._summary_cache[cache_key] = summary
-            self._summary_cache.move_to_end(cache_key)
-            while len(self._summary_cache) > self.SUMMARY_CACHE_MAX_ITEMS:
-                self._summary_cache.popitem(last=False)
-        return summary
+        # Single-LLM-call mode: skip model-based history summary.
+        return ""
 
     def _build_history_views(self, history: List[Dict[str, Any]] = None) -> Dict[str, Any]:
         normalized_history = self._normalize_history(history, max_turns=None)
@@ -464,15 +474,29 @@ class SimpleRAG:
         ]
         return any(re.search(pattern, question, flags=re.IGNORECASE) for pattern in patterns)
 
-    def _answer_meets_policy(
-        self,
-        question: str,
-        answer: str,
-        contexts: List[Dict[str, Any]],
-    ) -> bool:
+    def _route_intent(self, question: str) -> Dict[str, str]:
+        question = str(question or "").strip()
+        if not question:
+            return {"intent": "qa", "reason": "empty"}
+
         if self._is_conversation_meta_question(question):
-            return bool(answer.strip())
-        return self._validate_citations(answer, contexts)
+            return {"intent": "conversation_meta", "reason": "history_query"}
+
+        asks_explanation = bool(
+            re.search(r"(如何|怎么|为什么|是什么|介绍|说明|区别|对比|原理|\?|？)", question, flags=re.IGNORECASE)
+        )
+        system_op = bool(
+            re.search(
+                r"(构建索引|重建知识库|刷新状态|清空会话|清空历史|导入文档|删除文档)",
+                question,
+                flags=re.IGNORECASE,
+            )
+        )
+
+        if system_op and not asks_explanation:
+            return {"intent": "system_operation", "reason": "ui_operation"}
+
+        return {"intent": "qa", "reason": "knowledge_query"}
 
     def _find_last_history_message(
         self,
@@ -506,48 +530,12 @@ class SimpleRAG:
                 return f"上一条回答是：{last_assistant_message}"
             return "当前对话里还没有上一条助手回答。"
 
-        history_for_answer = normalized_history[-self.CONVERSATION_META_MAX_MESSAGES :]
-        history_text = self._history_messages_to_text(history_for_answer)
-        messages = prompts.get_conversation_meta_prompt_template(question, history_text)
-        try:
-            answer = RAGHelpers._chat_completion(
-                self._ollama_host,
-                messages,
-                model_name=self._chat_model,
-                temperature=0.1,
-            ).strip()
-            if answer:
-                return answer
-        except Exception as exc:
-            logger.warning(f"Conversation-meta answer generation failed: {exc}")
+        return "该问题更适合直接查看最近对话记录；当前模式不再调用额外模型做会话回顾生成。"
 
-        return "我只能根据当前对话历史来回答，但暂时无法从现有历史中整理出可靠结果。"
 
     def _rewrite_query(self, original_query: str, history_text: str = "") -> str:
-        if not history_text.strip():
-            return original_query
-
-        messages = prompts.get_query_rewrite_prompt_template(original_query, history_text)
-        url = f"{self._ollama_host}/api/chat"
-        data = {
-            "model": self._chat_model,
-            "messages": messages,
-            "stream": False,
-            "options": {"temperature": 0.1},
-        }
-        try:
-            response = requests.post(
-                url,
-                headers={"Content-Type": "application/json"},
-                json=data,
-                timeout=60,
-            )
-            response.raise_for_status()
-            content = response.json()["message"]["content"].strip()
-            return self._extract_rewritten_query(content, original_query)
-        except Exception as exc:
-            logger.warning(f"Query rewriting failed: {exc}")
-            return original_query
+        # Single-LLM-call mode: skip model-based query rewriting.
+        return original_query
 
     def _rerank_results(self, query: str, results: list, top_k: int = 5) -> list:
         return self._querier._rerank_results(query, results, top_k)
@@ -589,28 +577,9 @@ class SimpleRAG:
             min_keep=MIN_RETRIEVE_KEEP,
         )
 
-    def _validate_citations(self, text: str, contexts: List[Dict[str, Any]]) -> bool:
-        if not text.strip():
-            return False
-        matches = re.findall(r"\[source=([^\]#]+)#chunk(\d+)\]", text, flags=re.IGNORECASE)
-        if not matches:
-            return False
-
-        valid_sources = {
-            (str(item.get("path", "")).strip(), str(item.get("chunk_index", "")).strip())
-            for item in contexts
-        }
-        if not valid_sources:
-            return False
-
-        return all(
-            (source_path.strip(), chunk_idx.strip()) in valid_sources
-            for source_path, chunk_idx in matches
-        )
-
     def _build_raw_context(self, contexts: List[Dict[str, Any]]) -> str:
         return "\n".join(
-            f"[source={item['path']}#chunk{item['chunk_index']}] {item['content']}"
+            f"[source={self._format_source_chunk(item.get('path', ''), item.get('chunk_index', ''))}] {item.get('content', '')}"
             for item in contexts
         )
 
@@ -679,7 +648,40 @@ class SimpleRAG:
         if cached_entry:
             return str(cached_entry.get("answer", ""))
 
-        if self._is_conversation_meta_question(question):
+        route_info = self._route_intent(question)
+        route_intent = route_info.get("intent", "qa")
+
+        if route_intent == "system_operation":
+            answer = (
+                "识别到这是系统操作请求。请在界面中执行对应动作："
+                "“知识库构建”页可执行索引构建与状态刷新，“对话”页可清空会话。"
+            )
+            self._store_query_entry(
+                cache_key,
+                {
+                    "answer": answer,
+                    "conversation_state": {
+                        "summary_used": conversation_state["summary_used"],
+                        "summary_text": conversation_state["summary_text"],
+                        "recent_history_text": conversation_state["recent_history_text"],
+                        "retrieval_history_text": conversation_state["retrieval_history_text"],
+                        "rewrite_skipped": True,
+                        "rewritten_query": question,
+                        "history_message_count": len(conversation_state["normalized_history"]),
+                    },
+                    "retrieved_results": [],
+                    "reranked_results": [],
+                    "diagnostics": {
+                        "reranker_status": "skipped_intent_router",
+                        "retrieval_fallback_used": False,
+                        "citation_retry_used": False,
+                        "compression_fallback_used": False,
+                    },
+                },
+            )
+            return answer
+
+        if route_intent == "conversation_meta":
             answer = self._answer_conversation_meta_question(
                 question,
                 conversation_state["normalized_history"],
@@ -728,12 +730,7 @@ class SimpleRAG:
             retrieved_results,
             top_k=top_k_compressed,
         )
-        compressed_context = self.compress_contexts(reranked_results)
-        compression_fallback_used = False
-        if not self._validate_citations(compressed_context, reranked_results):
-            logger.warning("Compressed context failed citation validation; falling back to raw context")
-            compressed_context = self._build_raw_context(reranked_results)
-            compression_fallback_used = True
+        compressed_context = self._build_raw_context(reranked_results)
 
         messages = self.prepare_final_prompt(
             question,
@@ -747,58 +744,10 @@ class SimpleRAG:
             model_name=self._chat_model,
             temperature=OLLAMA_CHAT_TEMPERATURE_DEFAULT,
         )
-        citation_retry_used = False
-        if self._answer_meets_policy(question, answer, reranked_results):
-            self._store_query_entry(
-                cache_key,
-                {
-                    "answer": answer,
-                    "conversation_state": {
-                        "summary_used": conversation_state["summary_used"],
-                        "summary_text": conversation_state["summary_text"],
-                        "recent_history_text": conversation_state["recent_history_text"],
-                        "retrieval_history_text": conversation_state["retrieval_history_text"],
-                        "rewrite_skipped": conversation_state["rewrite_skipped"],
-                        "rewritten_query": conversation_state["rewritten_query"],
-                        "history_message_count": len(conversation_state["normalized_history"]),
-                    },
-                    "retrieved_results": retrieved_results,
-                    "reranked_results": reranked_results,
-                    "diagnostics": {
-                        "reranker_status": self._querier.get_reranker_status(),
-                        "retrieval_fallback_used": bool(retrieved_results and len(retrieved_results) < MIN_RETRIEVE_KEEP),
-                        "citation_retry_used": citation_retry_used,
-                        "compression_fallback_used": compression_fallback_used,
-                    },
-                },
-            )
-            return answer
-
-        logger.warning("Answer citation validation failed; retrying with raw context")
-        citation_retry_used = True
-        raw_context = self._build_raw_context(reranked_results)
-        fallback_messages = self.prepare_final_prompt(
-            question,
-            reranked_results,
-            raw_context,
-            history_text=conversation_state["retrieval_history_text"],
-        )
-        fallback_answer = RAGHelpers._chat_completion(
-            self._ollama_host,
-            fallback_messages,
-            model_name=self._chat_model,
-            temperature=OLLAMA_CHAT_TEMPERATURE_DEFAULT,
-        )
-        if not self._answer_meets_policy(question, fallback_answer, reranked_results):
-            logger.warning("Fallback answer still failed policy validation")
-            return (
-                "无法基于当前索引文档生成带有效引用的可靠回答。"
-                "请尝试换一种问法，或确认答案能够从已索引文档中直接得到。"
-            )
         self._store_query_entry(
             cache_key,
             {
-                "answer": fallback_answer,
+                "answer": answer,
                 "conversation_state": {
                     "summary_used": conversation_state["summary_used"],
                     "summary_text": conversation_state["summary_text"],
@@ -813,12 +762,12 @@ class SimpleRAG:
                 "diagnostics": {
                     "reranker_status": self._querier.get_reranker_status(),
                     "retrieval_fallback_used": bool(retrieved_results and len(retrieved_results) < MIN_RETRIEVE_KEEP),
-                    "citation_retry_used": citation_retry_used,
-                    "compression_fallback_used": compression_fallback_used,
+                    "citation_retry_used": False,
+                    "compression_fallback_used": False,
                 },
             },
         )
-        return fallback_answer
+        return answer
 
     def answer_question_stream(
         self,
@@ -835,8 +784,6 @@ class SimpleRAG:
         yield "\n开始检索流程\n"
         try:
             fallback_retrieval_used = False
-            citation_retry_used = False
-            compression_fallback_used = False
 
             if not FAISS_INDEX_FILE.exists() or not METADATA_FILE.exists():
                 yield "知识库为空或加载失败。\n"
@@ -873,13 +820,13 @@ class SimpleRAG:
                     yield self._debug_event("history_summary", cached_state["summary_text"])
                 if cached_state.get("recent_history_text"):
                     yield self._debug_event("retrieval_history", cached_state["recent_history_text"])
-                yield "步骤 0：结合对话理解并改写查询\n"
+                yield "Step 0: prepare retrieval query from conversation context\n"
                 yield self._debug_event(
                     "rewrite_mode",
                     "skipped" if cached_state.get("rewrite_skipped") else "used",
                 )
-                yield f"原始问题：{question}\n"
-                yield f"改写后的查询：{cached_state.get('rewritten_query', question)}\n\n"
+                yield f"Original question: {question}\n"
+                yield f"Retrieval query: {cached_state.get('rewritten_query', question)}\n\n"
                 yield self._debug_event(
                     "rewritten_query",
                     cached_state.get("rewritten_query", question),
@@ -894,14 +841,12 @@ class SimpleRAG:
                     "reranked_results",
                     cached_entry.get("reranked_results", []),
                 )
-                if cached_diagnostics.get("compression_fallback_used"):
-                    yield "压缩结果未通过引用校验，已回退到原始上下文。\n"
                 yield "\n最终回答\n"
                 yield str(cached_entry.get("answer", ""))
                 yield (
                     f"\n\n诊断信息：重排器={localize_runtime_status(cached_diagnostics.get('reranker_status', 'unknown'))}，"
                     f"召回回退={'是' if bool(cached_diagnostics.get('retrieval_fallback_used')) else '否'}，"
-                    f"引用重试={'是' if bool(cached_diagnostics.get('citation_retry_used')) else '否'}\n"
+                    "引用重试=否\n"
                 )
                 return
 
@@ -918,7 +863,51 @@ class SimpleRAG:
             if conversation_state["recent_history_text"]:
                 yield self._debug_event("retrieval_history", conversation_state["recent_history_text"])
 
-            if self._is_conversation_meta_question(question):
+            route_info = self._route_intent(question)
+            route_intent = route_info.get("intent", "qa")
+            yield self._debug_event("intent_route", route_info)
+
+            if route_intent == "system_operation":
+                answer = (
+                    "识别到这是系统操作请求。请在界面中执行对应动作："
+                    "“知识库构建”页可执行索引构建与状态刷新，“对话”页可清空会话。"
+                )
+                yield "步骤 0：轻量意图路由\n"
+                yield self._debug_event("rewrite_mode", "router_only")
+                yield self._debug_event("retrieved_results", [])
+                yield self._debug_event("reranked_results", [])
+                yield "\n最终回答\n"
+                yield answer
+                self._store_query_entry(
+                    cache_key,
+                    {
+                        "answer": answer,
+                        "conversation_state": {
+                            "summary_used": conversation_state["summary_used"],
+                            "summary_text": conversation_state["summary_text"],
+                            "recent_history_text": conversation_state["recent_history_text"],
+                            "retrieval_history_text": conversation_state["retrieval_history_text"],
+                            "rewrite_skipped": True,
+                            "rewritten_query": question,
+                            "history_message_count": len(conversation_state["normalized_history"]),
+                        },
+                        "retrieved_results": [],
+                        "reranked_results": [],
+                        "diagnostics": {
+                            "reranker_status": "skipped_intent_router",
+                            "retrieval_fallback_used": False,
+                            "citation_retry_used": False,
+                            "compression_fallback_used": False,
+                        },
+                    },
+                )
+                yield (
+                    f"\n\n诊断信息：重排器={localize_runtime_status('skipped_intent_router')}，"
+                    "召回回退=否，引用重试=否\n"
+                )
+                return
+
+            if route_intent == "conversation_meta":
                 answer = self._answer_conversation_meta_question(
                     question,
                     conversation_state["normalized_history"],
@@ -952,17 +941,20 @@ class SimpleRAG:
                         },
                     },
                 )
-                yield "\n\n诊断信息：重排器=skipped_conversation_only，召回回退=否，引用重试=否\n"
+                yield (
+                    f"\n\n诊断信息：重排器={localize_runtime_status('skipped_conversation_only')}，"
+                    "召回回退=否，引用重试=否\n"
+                )
                 return
 
-            yield "步骤 0：结合对话理解并改写查询\n"
+            yield "Step 0: prepare retrieval query from conversation context\n"
             rewrite_mode = "skipped" if conversation_state["rewrite_skipped"] else "used"
             yield self._debug_event("rewrite_mode", rewrite_mode)
-            yield f"原始问题：{question}\n"
-            yield f"改写后的查询：{conversation_state['rewritten_query']}\n\n"
+            yield f"Original question: {question}\n"
+            yield f"Retrieval query: {conversation_state['rewritten_query']}\n\n"
             yield self._debug_event("rewritten_query", conversation_state["rewritten_query"])
 
-            yield "步骤 1：向量化改写后的查询\n"
+            yield "Step 1: vectorize retrieval query\n"
             with torch.no_grad():
                 question_vector = self.embedding_model.encode(
                     conversation_state["rewritten_query"],
@@ -1003,7 +995,7 @@ class SimpleRAG:
             for index_id, item in enumerate(retrieved_results[:3], start=1):
                 yield (
                     f"[候选{index_id}] 相似度={item['score']:.4f}\n"
-                    f"来源={item['path']}#chunk{item['chunk_index']}\n"
+                    f"Source={self._format_source_chunk(item['path'], item['chunk_index'])}\n"
                     f"{item['content'][:100]}...\n"
                     "----------------------------------------\n"
                 )
@@ -1034,7 +1026,7 @@ class SimpleRAG:
                 for index_id, item in enumerate(reranked_results, start=1):
                     yield (
                         f"[重排{index_id}] 重排分数={item['rerank_score']:.4f}\n"
-                        f"来源={item['path']}#chunk{item['chunk_index']}\n"
+                        f"Source={self._format_source_chunk(item['path'], item['chunk_index'])}\n"
                         f"{item['content'][:100]}...\n"
                         "----------------------------------------\n"
                     )
@@ -1042,21 +1034,16 @@ class SimpleRAG:
                 for index_id, item in enumerate(reranked_results, start=1):
                     yield (
                         f"[初排{index_id}] 相似度={item['score']:.4f}\n"
-                        f"来源={item['path']}#chunk{item['chunk_index']}\n"
+                        f"Source={self._format_source_chunk(item['path'], item['chunk_index'])}\n"
                         f"{item['content'][:100]}...\n"
                         "----------------------------------------\n"
                     )
 
-            yield "\n开始压缩召回上下文\n"
+            yield "\nRetrieval context prepared: using reranked snippets as final grounding context\n"
             yield f"输入片段数量：{len(reranked_results)}\n\n"
 
-            compressed_content = self.compress_contexts(reranked_results)
-            if not self._validate_citations(compressed_content, reranked_results):
-                yield "压缩结果未通过引用校验，已回退到原始上下文。\n"
-                compressed_content = self._build_raw_context(reranked_results)
-                compression_fallback_used = True
-            yield f"压缩模型：{self._compressor_model}\n"
-            yield f"压缩后的上下文：\n{compressed_content}\n上下文压缩完成\n\n"
+            compressed_content = self._build_raw_context(reranked_results)
+            yield f"用于生成的上下文长度：{len(compressed_content)} 字符\n"
 
             final_messages = self.prepare_final_prompt(
                 question,
@@ -1086,37 +1073,6 @@ class SimpleRAG:
             ):
                 full_answer += token
                 yield token
-
-            if not self._answer_meets_policy(question, full_answer, reranked_results):
-                citation_retry_used = True
-                yield "\n\n[提示] 回答中的引用不完整，正在基于原始上下文重试。\n"
-                yield self.ANSWER_REPLACE_MARKER
-                raw_context = self._build_raw_context(reranked_results)
-                fallback_messages = self.prepare_final_prompt(
-                    question,
-                    reranked_results,
-                    raw_context,
-                    history_text=conversation_state["retrieval_history_text"],
-                )
-                fallback_answer = ""
-                for token in RAGHelpers._chat_completion_stream(
-                    self._ollama_host,
-                    fallback_messages,
-                    model_name=self._chat_model,
-                    temperature=OLLAMA_CHAT_TEMPERATURE_DEFAULT,
-                ):
-                    fallback_answer += token
-                    yield token
-                full_answer = fallback_answer
-
-                if not self._answer_meets_policy(question, full_answer, reranked_results):
-                    logger.warning("Streaming fallback answer still failed policy validation")
-                    yield self.ANSWER_REPLACE_MARKER
-                    full_answer = (
-                        "无法基于当前索引文档生成带有效引用的可靠回答。"
-                        "请尝试换一种问法，或确认答案能够从已索引文档中直接得到。"
-                    )
-                    yield full_answer
 
             self._store_query_entry(
                 cache_key,
@@ -1153,8 +1109,8 @@ class SimpleRAG:
                     "diagnostics": {
                         "reranker_status": self._querier.get_reranker_status(),
                         "retrieval_fallback_used": fallback_retrieval_used,
-                        "citation_retry_used": citation_retry_used,
-                        "compression_fallback_used": compression_fallback_used,
+                        "citation_retry_used": False,
+                        "compression_fallback_used": False,
                     },
                 },
             )
@@ -1162,7 +1118,7 @@ class SimpleRAG:
             yield (
                 f"\n\n诊断信息：重排器={localize_runtime_status(self._querier.get_reranker_status())}，"
                 f"召回回退={'是' if fallback_retrieval_used else '否'}，"
-                f"引用重试={'是' if citation_retry_used else '否'}\n"
+                "引用重试=否\n"
             )
         except SnapshotLoadError as exc:
             logger.error(f"Streaming QA snapshot load failed: {exc}")
@@ -1170,3 +1126,8 @@ class SimpleRAG:
         except Exception as exc:
             logger.error(f"Streaming QA failed: {exc}", exc_info=True)
             yield f"\n[错误] 处理请求时发生内部错误：{exc}\n"
+
+
+if __name__ == '__main__':
+    print('Please run: python LightweightRAG.py')
+

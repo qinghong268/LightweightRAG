@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{{ initial_state.page_title }}</title>
+    <link rel="stylesheet" href="{{ url_for('serve_asset', filename='lightweightrag.css') }}">
+</head>
+<body>
+    <div class="page-shell">
+        <header class="page-header">
+            <h1>{{ initial_state.page_title }}</h1>
+            <p>面向生产场景的 RAG/检索增强技术问答系统</p>
+        </header>
+
+        <nav class="tab-bar" aria-label="主导航">
+            <button class="tab-button is-active" type="button" data-tab-target="chat-tab">对话</button>
+            <button class="tab-button" type="button" data-tab-target="build-tab">知识库构建</button>
+        </nav>
+
+        <main class="tab-panels">
+            <section class="tab-panel is-active" data-tab-panel="chat-tab">
+                <div class="chat-grid">
+                    <div class="panel panel-stretch">
+                        <div class="panel-title">对话窗口</div>
+                        <div id="chatMessages" class="chat-messages"></div>
+                        <div class="composer-row">
+                            <input id="questionInput" class="plain-input flex-fill" type="text" placeholder="请输入你的问题...">
+                            <button id="sendButton" class="plain-button primary" type="button">发送</button>
+                        </div>
+                        <div class="sub-actions">
+                            <button id="clearButton" class="plain-button danger" type="button">清空会话</button>
+                        </div>
+                        <div id="clearConfirmRow" class="confirm-row is-hidden">
+                            <span>确定要清空当前会话吗？</span>
+                            <button id="confirmClearButton" class="plain-button danger" type="button">确认清空</button>
+                            <button id="cancelClearButton" class="plain-button" type="button">取消</button>
+                        </div>
+                    </div>
+
+                    <div class="panel">
+                        <div class="panel-title">检索参数调节</div>
+                        <label class="field-block">
+                            <span>参数预设</span>
+                            <select id="presetSelect" class="plain-select">
+                                {% for preset_name in presets.keys() %}
+                                <option value="{{ preset_name }}" {% if preset_name == initial_state.preset_default %}selected{% endif %}>{{ preset_name }}</option>
+                                {% endfor %}
+                            </select>
+                        </label>
+                        <label class="field-block">
+                            <span>检索候选数</span>
+                            <input id="topKRetInput" class="plain-range" type="range" min="1" max="50" step="1" value="{{ initial_state.top_k_ret_default }}">
+                            <div class="range-row">
+                                <span>当前值</span>
+                                <strong id="topKRetValue">{{ initial_state.top_k_ret_default }}</strong>
+                            </div>
+                        </label>
+                        <label class="field-block">
+                            <span>重排保留数</span>
+                            <input id="topKCompInput" class="plain-range" type="range" min="1" max="30" step="1" value="{{ initial_state.top_k_comp_default }}">
+                            <div class="range-row">
+                                <span>当前值</span>
+                                <strong id="topKCompValue">{{ initial_state.top_k_comp_default }}</strong>
+                            </div>
+                        </label>
+                        <label class="field-block">
+                            <span>相似度阈值</span>
+                            <input id="thresholdInput" class="plain-range" type="range" min="0" max="1" step="0.01" value="{{ initial_state.threshold_default }}">
+                            <div class="range-row">
+                                <span>当前值</span>
+                                <strong id="thresholdValue">{{ '%.2f' | format(initial_state.threshold_default) }}</strong>
+                            </div>
+                        </label>
+                        <label class="checkbox-row">
+                            <input id="multiTurnInput" type="checkbox" {% if initial_state.multi_turn_default %}checked{% endif %}>
+                            <span>启用多轮对话</span>
+                        </label>
+                    </div>
+                </div>
+
+                <div class="section-title">当前处理信息</div>
+                <div class="info-grid">
+                    <div class="panel panel-stretch">
+                        <div class="panel-title">处理日志</div>
+                        <textarea id="currentProcessLog" class="plain-textarea tall-log" readonly>{{ initial_state.current_process_log }}</textarea>
+                    </div>
+                    <div class="panel">
+                        <div class="panel-title">历史日志</div>
+                        <div id="logHtmlDisplay" class="scroll-panel-content">{{ initial_state.log_html_display | safe }}</div>
+                    </div>
+                    <div class="panel">
+                        <div class="panel-title">检索结果</div>
+                        <div id="retrievalResultsHtml" class="scroll-panel-content">{{ initial_state.retrieval_results_html | safe }}</div>
+                    </div>
+                    <div class="panel">
+                        <div class="panel-title">引用预览</div>
+                        <div id="citationPreviewHtml" class="scroll-panel-content">{{ initial_state.citation_preview_html | safe }}</div>
+                    </div>
+                    <div class="panel panel-full">
+                        <div class="panel-title">检索增强评估</div>
+                        <div id="onlineEvalHtml">{{ initial_state.online_eval_html | safe }}</div>
+                    </div>
+                </div>
+            </section>
+
+            <section class="tab-panel" data-tab-panel="build-tab">
+                <div class="section-title">知识库构建</div>
+                <div class="info-grid">
+                    <div class="panel">
+                        <div class="panel-title">知识库状态</div>
+                        <div id="knowledgeBaseStatusHtml">{{ initial_state.knowledge_base_status_html | safe }}</div>
+                    </div>
+                    <div class="panel">
+                        <div class="panel-title">构建报告</div>
+                        <div id="buildReportHtml">{{ initial_state.build_report_html | safe }}</div>
+                    </div>
+                    <div class="panel">
+                        <div class="panel-title">构建参数</div>
+                        <label class="field-block">
+                            <span>文档目录</span>
+                            <input id="dirInput" class="plain-input" type="text" value="{{ initial_state.doc_dir }}">
+                        </label>
+                        <label class="field-block">
+                            <span>分块长度</span>
+                            <input id="chunkSizeInput" class="plain-input" type="number" step="1" value="{{ initial_state.chunk_size_default }}">
+                        </label>
+                        <label class="field-block">
+                            <span>分块重叠</span>
+                            <input id="overlapInput" class="plain-input" type="number" step="1" value="{{ initial_state.chunk_overlap_default }}">
+                        </label>
+                        <div class="action-row">
+                            <button id="buildButton" class="plain-button primary" type="button">构建索引</button>
+                            <button id="refreshStatusButton" class="plain-button" type="button">刷新状态</button>
+                        </div>
+                    </div>
+                    <div class="panel panel-stretch">
+                        <div class="panel-title">构建过程</div>
+                        <input id="buildStatus" class="plain-input" type="text" value="{{ initial_state.build_status }}" readonly>
+                        <textarea id="buildLog" class="plain-textarea log-box" readonly>{{ initial_state.build_log }}</textarea>
+                    </div>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <script>
+        window.__INITIAL_STATE__ = {{ initial_state | tojson }};
+        window.__PRESET_OPTIONS__ = {{ presets | tojson }};
+    </script>
+    <script src="{{ url_for('serve_asset', filename='lightweightrag.js') }}"></script>
+</body>
+</html>
+
+

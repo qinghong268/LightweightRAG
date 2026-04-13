@@ -71,6 +71,27 @@ def _load_text_document(file_path: Path) -> List[Document]:
     )
 
 
+def get_supported_extensions() -> set[str]:
+    supported_extensions = {".txt"}
+    if PDF_AVAILABLE:
+        supported_extensions.add(".pdf")
+    if DOCX_AVAILABLE:
+        supported_extensions.add(".docx")
+    return supported_extensions
+
+
+def discover_supported_document_files(folder_path: str | Path) -> List[Path]:
+    folder = Path(folder_path)
+    if not folder.exists() or not folder.is_dir():
+        return []
+    supported_extensions = get_supported_extensions()
+    return [
+        file_path
+        for file_path in _iter_files(folder)
+        if file_path.suffix.lower() in supported_extensions
+    ]
+
+
 def batch_load_documents(folder_path: str) -> List[Document]:
     folder = Path(folder_path)
     if not folder.exists() or not folder.is_dir():
@@ -78,18 +99,10 @@ def batch_load_documents(folder_path: str) -> List[Document]:
         return []
 
     all_docs: List[Document] = []
-    supported_extensions = {".txt"}
-    if PDF_AVAILABLE:
-        supported_extensions.add(".pdf")
-    if DOCX_AVAILABLE:
-        supported_extensions.add(".docx")
+    supported_extensions = get_supported_extensions()
 
     discovered_files = _iter_files(folder)
-    supported_files = [
-        file_path
-        for file_path in discovered_files
-        if file_path.suffix.lower() in supported_extensions
-    ]
+    supported_files = discover_supported_document_files(folder)
     unsupported_examples = []
     unsupported_count = 0
 

@@ -100,25 +100,38 @@ class RAGQuerier:
                 logger.error(f"Failed to load FAISS snapshot: {exc}")
                 raise SnapshotLoadError(f"Failed to load knowledge-base snapshot: {exc}") from exc
 
-            if index is None or not metadata_map:
+            if index is None:
+                return []
+
+            snapshot_chunk_ids = metadata_map.get("chunk_ids", []) if isinstance(metadata_map, dict) else []
+            uses_vector_ids = bool(metadata_map.get("uses_vector_ids")) if isinstance(metadata_map, dict) else False
+            if not uses_vector_ids and not snapshot_chunk_ids:
                 return []
 
             query_array = np.array([query_vec], dtype=np.float32)
             faiss.normalize_L2(query_array)
-            candidate_k = min(len(metadata_map), max(top_k, top_k * 3, min_keep))
+            available_total = int(index.ntotal)
+            candidate_k = min(available_total, max(top_k, top_k * 3, min_keep))
+            if candidate_k <= 0:
+                return []
             scores, indices = index.search(query_array, candidate_k)
 
             ranked_hits: List[Dict[str, Any]] = []
             selected_chunk_ids: List[int] = []
             for i in range(len(indices[0])):
                 idx = indices[0][i]
-                if idx >= len(metadata_map):
+                if idx < 0:
                     continue
-                chunk_id = metadata_map[idx].get("chunk_id")
-                if chunk_id is None:
+                if uses_vector_ids:
+                    chunk_id = int(idx)
+                else:
+                    if idx >= len(snapshot_chunk_ids):
+                        continue
+                    chunk_id = int(snapshot_chunk_ids[idx])
+                if chunk_id < 0:
                     continue
-                ranked_hits.append({"score": float(scores[0][i]), "chunk_id": int(chunk_id)})
-                selected_chunk_ids.append(int(chunk_id))
+                ranked_hits.append({"score": float(scores[0][i]), "chunk_id": chunk_id})
+                selected_chunk_ids.append(chunk_id)
 
             if not ranked_hits:
                 return []

@@ -1023,67 +1023,6 @@ def _run_async_in_thread(coro):
     return result["value"]
 
 
-def build_knowledge_base_task(source_dir_str, chunk_size, overlap, progress=gr.Progress()):
-    source_dir = Path(source_dir_str) if source_dir_str else DOC_DIR
-    logs = logger.write_log(f"正在扫描源目录：{source_dir}")
-
-    if not source_dir.exists() or not source_dir.is_dir():
-        logs += logger.write_log(f"目录不存在或不是文件夹：{source_dir}")
-        return (
-            "失败",
-            clean_log_text(logs),
-            generate_knowledge_base_status_html(),
-            generate_build_report_html(get_last_build_report()),
-        )
-
-    try:
-        progress(0, desc="准备构建中...")
-        logs += logger.write_log("正在初始化 RAG 引擎...")
-        rag = get_rag_instance()
-        logs += logger.write_log("RAG 引擎已就绪。")
-        progress(0.05, desc="RAG 引擎初始化完成")
-
-        async def run_build():
-            return await rag.build_knowledge_base_async(
-                source_dir,
-                chunk_size=_coerce_optional_int(chunk_size),
-                overlap=_coerce_optional_int(overlap),
-            )
-
-        captured_stdout = io.StringIO()
-        captured_stderr = io.StringIO()
-        with contextlib.redirect_stdout(captured_stdout), contextlib.redirect_stderr(captured_stderr):
-            build_report = _run_async_in_thread(run_build())
-
-        runtime_output = (captured_stdout.getvalue() + captured_stderr.getvalue()).strip()
-        if runtime_output:
-            logs += runtime_output
-            if not logs.endswith("\n"):
-                logs += "\n"
-
-        try:
-            index, _ = RAGHelpers.load_faiss_index_and_metadata(FAISS_INDEX_FILE, METADATA_FILE)
-            count = index.ntotal if index is not None else "未知"
-            logs += logger.write_log(f"构建完成。当前向量总数：{count}")
-            logs += logger.write_log("索引文件已保存到本地。")
-        except Exception:
-            logs += logger.write_log("构建已完成。")
-
-        return (
-            "成功",
-            clean_log_text(logs),
-            generate_knowledge_base_status_html(),
-            generate_build_report_html(build_report),
-        )
-    except Exception as exc:
-        logs += logger.write_log(f"构建失败：{exc}")
-        return (
-            "失败",
-            clean_log_text(logs),
-            generate_knowledge_base_status_html(),
-            generate_build_report_html(get_last_build_report()),
-        )
-
 def build_knowledge_base_task_with_doc_preprocess(
     source_dir_str,
     chunk_size,
@@ -1652,14 +1591,6 @@ with gr.Blocks(title="大模型/RAG/AI开发知识体系轻量问答系统", the
     )
 
 
-if False and __name__ == "__main__":
-    print("系统启动中，请稍候...")
-    try:
-        demo.launch(server_name="0.0.0.0", server_port=7860, quiet=True)
-    except TypeError:
-        demo.launch(server_name="0.0.0.0", server_port=7860)
-
-
 if __name__ == "__main__":
     print("系统启动中，请稍候...")
     local_url = "http://127.0.0.1:7860"
@@ -1692,3 +1623,4 @@ if __name__ == "__main__":
             time.sleep(3600)
     except KeyboardInterrupt:
         print("程序已停止。")
+
