@@ -826,7 +826,6 @@ class SimpleRAG:
                     "skipped" if cached_state.get("rewrite_skipped") else "used",
                 )
                 yield f"Original question: {question}\n"
-                yield f"Retrieval query: {cached_state.get('rewritten_query', question)}\n\n"
                 yield self._debug_event(
                     "rewritten_query",
                     cached_state.get("rewritten_query", question),
@@ -951,7 +950,6 @@ class SimpleRAG:
             rewrite_mode = "skipped" if conversation_state["rewrite_skipped"] else "used"
             yield self._debug_event("rewrite_mode", rewrite_mode)
             yield f"Original question: {question}\n"
-            yield f"Retrieval query: {conversation_state['rewritten_query']}\n\n"
             yield self._debug_event("rewritten_query", conversation_state["rewritten_query"])
 
             yield "Step 1: vectorize retrieval query\n"
@@ -1039,11 +1037,9 @@ class SimpleRAG:
                         "----------------------------------------\n"
                     )
 
-            yield "\nRetrieval context prepared: using reranked snippets as final grounding context\n"
             yield f"输入片段数量：{len(reranked_results)}\n\n"
 
             compressed_content = self._build_raw_context(reranked_results)
-            yield f"用于生成的上下文长度：{len(compressed_content)} 字符\n"
 
             final_messages = self.prepare_final_prompt(
                 question,

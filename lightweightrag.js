@@ -29,7 +29,6 @@
         currentProcessLog: document.getElementById('currentProcessLog'),
         logHtmlDisplay: document.getElementById('logHtmlDisplay'),
         retrievalResultsHtml: document.getElementById('retrievalResultsHtml'),
-        citationPreviewHtml: document.getElementById('citationPreviewHtml'),
         onlineEvalHtml: document.getElementById('onlineEvalHtml'),
         knowledgeBaseStatusHtml: document.getElementById('knowledgeBaseStatusHtml'),
         buildReportHtml: document.getElementById('buildReportHtml'),
@@ -166,7 +165,6 @@
         setInputValue(elements.currentProcessLog, payload.current_process_log);
         setPanelHtml(elements.logHtmlDisplay, payload.log_html_display);
         setPanelHtml(elements.retrievalResultsHtml, payload.retrieval_results_html);
-        setPanelHtml(elements.citationPreviewHtml, payload.citation_preview_html);
         setPanelHtml(elements.onlineEvalHtml, payload.online_eval_html);
     }
 
@@ -178,7 +176,6 @@
         setInputValue(elements.currentProcessLog, payload.current_process_log);
         setPanelHtml(elements.logHtmlDisplay, payload.log_html_display);
         setPanelHtml(elements.retrievalResultsHtml, payload.retrieval_results_html);
-        setPanelHtml(elements.citationPreviewHtml, payload.citation_preview_html);
         setPanelHtml(elements.onlineEvalHtml, payload.online_eval_html);
 
         if (elements.clearConfirmRow) {
@@ -227,6 +224,11 @@
 
         setBusy('chat');
         elements.questionInput.value = '';
+        setPanelHtml(
+            elements.onlineEvalHtml,
+            "<div style='color:#6b7280;font-style:italic;'>本轮评估进行中，回答完成后将显示本轮结果。</div>",
+        );
+        const requestId = `req-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
         try {
             const response = await fetch('/api/chat/stream', {
@@ -235,6 +237,7 @@
                     'Content-Type': 'application/json',
                 },
                 body: JSON.stringify({
+                    request_id: requestId,
                     question,
                     history: state.chatbot,
                     top_k_ret: Number(elements.topKRetInput.value),

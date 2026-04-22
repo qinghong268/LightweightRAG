@@ -1,4 +1,4 @@
-import asyncio
+﻿import asyncio
 import contextlib
 import html
 import io
@@ -10,9 +10,21 @@ import sqlite3
 import sys
 import threading
 import time
+import uuid
 import warnings
 from datetime import datetime
 from pathlib import Path
+
+from flask import (
+    Flask,
+    Response,
+    abort,
+    jsonify,
+    render_template,
+    request,
+    send_from_directory,
+    stream_with_context,
+)
 
 os.environ.setdefault("GRADIO_ANALYTICS_ENABLED", "False")
 os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
@@ -43,8 +55,6 @@ try:
     )
 except Exception:
     pass
-
-import gradio as gr
 
 try:
     import simpleRAG_content
@@ -97,6 +107,9 @@ def is_process_log(text):
         "Original question:",
         "原始问题：",
         "Rewritten query:",
+        "Retrieval query:",
+        "Retrieval context prepared:",
+        "用于生成的上下文长度：",
         "改写后的查询：",
         "Vectorized query dimension:",
         "查询向量维度：",
@@ -250,7 +263,7 @@ def generate_retrieval_html(retrieved_results, reranked_results):
 
 def generate_citation_preview_html(answer_text, source_results):
     source_results = source_results or []
-    matches = re.findall(r"\[source=([^\]#]+)#chunk(\d+)\]", answer_text or "", flags=re.IGNORECASE)
+    matches = re.findall(r"source=([^\],#]+)#chunk(\d+)", answer_text or "", flags=re.IGNORECASE)
     if not matches:
         return "<div style='color: #888; font-style: italic;'>最新回答里还没有引用。</div>"
 
@@ -301,6 +314,109 @@ def generate_citation_preview_html(answer_text, source_results):
         "</div>"
     )
 
+
+
+def _to_project_relative_path(path_text):
+    raw = str(path_text or "").strip()
+    if not raw:
+        return ""
+    try:
+        project_root = Path(__file__).resolve().parent
+        path_obj = Path(raw).resolve()
+        rel_path = path_obj.relative_to(project_root)
+        return str(rel_path).replace("\\", "/")
+    except Exception:
+        return raw.replace("\\", "/")
+
+
+def _extract_citation_keys(answer_text):
+    matches = re.findall(r"source=([^\],#]+)#chunk(\d+)", str(answer_text or ""), flags=re.IGNORECASE)
+    keys = set()
+    for path, chunk_index in matches:
+        rel_path = _to_project_relative_path(path).lower()
+        keys.add((rel_path, str(chunk_index).strip()))
+    return keys
+
+
+def _compute_online_eval_snapshot(question, answer_text, retrieved_results, reranked_results, elapsed_ms):
+    retrieved_results = retrieved_results or []
+    reranked_results = reranked_results or []
+    answer_text = str(answer_text or "")
+
+    retrieved_count = len(retrieved_results)
+    reranked_count = len(reranked_results)
+    answer_length = len(answer_text.strip())
+
+    citation_keys = _extract_citation_keys(answer_text)
+    source_keys = set()
+    source_pool = reranked_results if reranked_results else retrieved_results
+    for item in source_pool:
+        rel_path = _to_project_relative_path(item.get("path", "")).lower()
+        chunk_index = str(item.get("chunk_index", "")).strip()
+        if rel_path and chunk_index:
+            source_keys.add((rel_path, chunk_index))
+
+    matched_citations = len(citation_keys.intersection(source_keys))
+    citation_total = len(citation_keys)
+    citation_coverage = (matched_citations / citation_total) if citation_total > 0 else 0.0
+    compression_ratio = (reranked_count / float(retrieved_count)) if retrieved_count > 0 else 0.0
+
+    # Online proxy metrics for the current turn only.
+    # recall@K: matched citations over retrieved candidates in this turn
+    # precision@K: matched citations over reranked kept candidates in this turn
+    # hit@K: whether at least one citation hits this-turn evidence
+    hit_rate_at_k = 1.0 if matched_citations > 0 else 0.0
+    recall_at_k = min(1.0, (matched_citations / float(retrieved_count))) if retrieved_count > 0 else 0.0
+    precision_at_k = min(1.0, (matched_citations / float(reranked_count))) if reranked_count > 0 else 0.0
+
+    latency_s = float(elapsed_ms or 0.0) / 1000.0
+    latency_score = 1.0 / (1.0 + (latency_s / 30.0))
+    overall_score = (
+        0.30 * hit_rate_at_k
+        + 0.25 * recall_at_k
+        + 0.15 * precision_at_k
+        + 0.15 * citation_coverage
+        + 0.15 * latency_score
+    ) * 100.0
+
+    return {
+        "question": str(question or "").strip(),
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "overall_score": round(overall_score, 1),
+        "latency_seconds": round(latency_s, 2),
+        "retrieved_count": retrieved_count,
+        "reranked_count": reranked_count,
+        "hit_rate_at_k": round(hit_rate_at_k, 4),
+        "recall_at_k": round(recall_at_k, 4),
+        "precision_at_k": round(precision_at_k, 4),
+        "citation_coverage": round(citation_coverage, 4),
+        "compression_ratio": round(compression_ratio, 4),
+        "answer_length": answer_length,
+    }
+
+def generate_online_eval_html(snapshot):
+    if not snapshot:
+        return "<div style='color: #888; font-style: italic;'>暂无评估结果，请先发起一次问答。</div>"
+
+    question_preview = html.escape(truncate_text(snapshot.get("question", ""), 80))
+    return f"""
+    <div style="border: 1px solid #e5e7eb; border-radius: 10px; padding: 12px; background: #fff;">
+        <div style="font-size:12px;color:#6b7280;margin-bottom:8px;">{html.escape(snapshot.get("timestamp", ""))}</div>
+        <div style="font-size:12px;color:#6b7280;margin-bottom:10px;">\u672c\u8f6e\u95ee\u9898\uff1a{question_preview}</div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:8px;">
+            <div><strong>综合得分</strong><br>{snapshot.get("overall_score", 0):.1f}</div>
+            <div><strong>端到端时延(秒)</strong><br>{snapshot.get("latency_seconds", 0):.2f}</div>
+            <div><strong>检索候选数</strong><br>{int(snapshot.get("retrieved_count", 0))}</div>
+            <div><strong>重排保留数</strong><br>{int(snapshot.get("reranked_count", 0))}</div>
+            <div><strong>召回率@K</strong><br>{snapshot.get("recall_at_k", 0):.4f}</div>
+            <div><strong>精确率@K</strong><br>{snapshot.get("precision_at_k", 0):.4f}</div>
+            <div><strong>命中率@K</strong><br>{snapshot.get("hit_rate_at_k", 0):.4f}</div>
+            <div><strong>引用覆盖率</strong><br>{snapshot.get("citation_coverage", 0):.4f}</div>
+            <div><strong>重排压缩率</strong><br>{snapshot.get("compression_ratio", 0):.4f}</div>
+            <div><strong>回答长度</strong><br>{int(snapshot.get("answer_length", 0))}</div>
+        </div>
+    </div>
+    """
 
 def truncate_text(text, limit=120):
     text = str(text or "").strip()
@@ -671,6 +787,8 @@ DEBUG_EVENT_LABELS = {
 }
 
 
+ANSWER_REPLACE_MARKER = getattr(simpleRAG_content.SimpleRAG, "ANSWER_REPLACE_MARKER", None)
+
 def _get_conversation_state():
     return conversation_store.get_state()
 
@@ -679,9 +797,25 @@ def _get_conversation_messages():
     return _get_conversation_state().get("messages", [])
 
 
+def _set_active_chat_request_id(request_id):
+    global active_chat_request_id
+    with active_chat_request_lock:
+        active_chat_request_id = str(request_id or "").strip()
+
+
+def _is_request_id_current(request_id):
+    with active_chat_request_lock:
+        current_request_id = active_chat_request_id
+    return bool(request_id) and current_request_id == str(request_id).strip()
+
+
 def _is_request_session_current(session_id):
     current_session_id = str(_get_conversation_state().get("active_session_id", "")).strip()
     return bool(session_id) and current_session_id == session_id
+
+
+def _is_request_current(session_id, request_id):
+    return _is_request_session_current(session_id) and _is_request_id_current(request_id)
 
 
 def _should_persist_answer(answer_text):
@@ -845,22 +979,6 @@ def reset_conversation_session():
     )
 
 
-def request_clear_conversation_confirmation():
-    return gr.update(visible=False), gr.update(visible=True)
-
-
-def cancel_clear_conversation_confirmation():
-    return gr.update(visible=True), gr.update(visible=False)
-
-
-def confirm_reset_conversation_session():
-    return (
-        *reset_conversation_session(),
-        gr.update(visible=True),
-        gr.update(visible=False),
-    )
-
-
 class OutputLogger:
     def write_log(self, message):
         timestamp = time.strftime("%H:%M:%S")
@@ -870,6 +988,8 @@ class OutputLogger:
 logger = OutputLogger()
 rag_instance = None
 rag_instance_lock = threading.Lock()
+active_chat_request_id = ""
+active_chat_request_lock = threading.Lock()
 
 
 def get_rag_instance():
@@ -959,46 +1079,6 @@ def _append_doc_preprocess_logs(logs, report):
     return logs, has_warning
 
 
-def _build_busy_control_updates(mode=None):
-    is_chat_busy = mode == "chat"
-    is_build_busy = mode == "build"
-    is_busy = is_chat_busy or is_build_busy
-
-    msg_placeholder = "输入你的问题..."
-    if is_chat_busy:
-        msg_placeholder = "回答生成中，请稍候..."
-    elif is_build_busy:
-        msg_placeholder = "知识库构建中，请稍候..."
-
-    submit_label = "生成中..." if is_chat_busy else "发送"
-    build_label = "构建中..." if is_build_busy else "构建索引"
-
-    return (
-        gr.update(interactive=not is_busy, placeholder=msg_placeholder),
-        gr.update(value=submit_label, interactive=not is_busy),
-        gr.update(interactive=not is_busy),
-        gr.update(interactive=not is_busy),
-        gr.update(interactive=not is_busy),
-        gr.update(interactive=not is_busy),
-        gr.update(interactive=not is_busy),
-        gr.update(interactive=not is_busy),
-        gr.update(value=build_label, interactive=not is_busy),
-        gr.update(interactive=not is_busy),
-    )
-
-
-def lock_controls_for_chat():
-    return _build_busy_control_updates("chat")
-
-
-def lock_controls_for_build():
-    return _build_busy_control_updates("build")
-
-
-def unlock_controls():
-    return _build_busy_control_updates()
-
-
 def _coerce_optional_int(value):
     if value in (None, ""):
         return None
@@ -1027,7 +1107,7 @@ def build_knowledge_base_task_with_doc_preprocess(
     source_dir_str,
     chunk_size,
     overlap,
-    progress=gr.Progress(),
+    progress=None,
 ):
     source_dir = Path(source_dir_str) if source_dir_str else DOC_DIR
     logs = logger.write_log(f"正在扫描源目录：{source_dir}")
@@ -1042,7 +1122,8 @@ def build_knowledge_base_task_with_doc_preprocess(
         )
 
     try:
-        progress(0, desc="准备构建中...")
+        if callable(progress):
+            progress(0, desc="准备构建中...")
         logs += logger.write_log("正在检查并预处理 .doc 文件...")
         preprocess_report = preprocess_doc_files_for_build(
             source_dir,
@@ -1050,12 +1131,14 @@ def build_knowledge_base_task_with_doc_preprocess(
             allow_install=False,
         )
         logs, has_preprocess_warning = _append_doc_preprocess_logs(logs, preprocess_report)
-        progress(0.08, desc="文档预处理完成")
+        if callable(progress):
+            progress(0.08, desc="文档预处理完成")
 
         logs += logger.write_log("正在初始化 RAG 引擎...")
         rag = get_rag_instance()
         logs += logger.write_log("RAG 引擎已就绪。")
-        progress(0.15, desc="RAG 引擎初始化完成")
+        if callable(progress):
+            progress(0.15, desc="RAG 引擎初始化完成")
 
         async def run_build():
             return await rag.build_knowledge_base_async(
@@ -1099,9 +1182,11 @@ def build_knowledge_base_task_with_doc_preprocess(
         )
 
 
-def answer_question_task(question, history, top_k_ret, top_k_comp, threshold, multi_turn_enabled, log_history_state):
+def answer_question_task(question, history, top_k_ret, top_k_comp, threshold, multi_turn_enabled, log_history_state, request_id=None):
     persisted_history = _get_conversation_messages()
     request_session_id = str(_get_conversation_state().get("active_session_id", "")).strip()
+    request_id = str(request_id or uuid.uuid4()).strip()
+    _set_active_chat_request_id(request_id)
     if not isinstance(history, list):
         history = persisted_history
     if not isinstance(log_history_state, list):
@@ -1118,10 +1203,12 @@ def answer_question_task(question, history, top_k_ret, top_k_comp, threshold, mu
     )
     current_q_logs = ""
     debug_lines = []
+    request_started_at = time.perf_counter()
+    final_online_eval_snapshot = None
     conversation_status_text = "当前会话历史会在回答完成后自动保存。"
 
     def emit(history_value, log_state_value, answer_text, manager_messages=None):
-        if not _is_request_session_current(request_session_id):
+        if not _is_request_current(request_session_id, request_id):
             return None
         manager_source = history_value if manager_messages is None else manager_messages
         (
@@ -1143,6 +1230,7 @@ def answer_question_task(question, history, top_k_ret, top_k_comp, threshold, mu
             history_manager_value,
             session_state_value,
             history_status_value,
+            generate_online_eval_html(final_online_eval_snapshot),
         )
 
     if not question:
@@ -1250,7 +1338,7 @@ def answer_question_task(question, history, top_k_ret, top_k_comp, threshold, mu
                 else:
                     return
             else:
-                if chunk == simpleRAG_content.SimpleRAG.ANSWER_REPLACE_MARKER:
+                if ANSWER_REPLACE_MARKER is not None and chunk == ANSWER_REPLACE_MARKER:
                     full_answer = ""
                     new_history[-1]["content"] = ""
                     workflow_state["citation_retry"] = True
@@ -1276,7 +1364,7 @@ def answer_question_task(question, history, top_k_ret, top_k_comp, threshold, mu
             workflow_state["status_detail"] = "流程已成功完成。"
 
         current_q_logs += logger.write_log("回答生成完成。")
-        if not _is_request_session_current(request_session_id):
+        if not _is_request_current(request_session_id, request_id):
             return
 
         if _should_persist_answer(full_answer):
@@ -1297,6 +1385,14 @@ def answer_question_task(question, history, top_k_ret, top_k_comp, threshold, mu
         if len(new_log_history) > 20:
             new_log_history = new_log_history[:20]
 
+        elapsed_ms = (time.perf_counter() - request_started_at) * 1000.0
+        final_online_eval_snapshot = _compute_online_eval_snapshot(
+            question,
+            full_answer,
+            latest_retrieved_results,
+            latest_reranked_results,
+            elapsed_ms,
+        )
         payload = emit(display_history, new_log_history, full_answer, manager_messages=manager_history)
         if payload is not None:
             yield payload
@@ -1309,6 +1405,14 @@ def answer_question_task(question, history, top_k_ret, top_k_comp, threshold, mu
         conversation_status_text = "本次回答失败，历史未自动写入持久化会话。"
         log_entry_label = f"{question[:30]}...（错误）({time.strftime('%H:%M:%S')})"
         new_log_history = [{"label": log_entry_label, "details": clean_log_text(current_q_logs)}] + log_history_state
+        elapsed_ms = (time.perf_counter() - request_started_at) * 1000.0
+        final_online_eval_snapshot = _compute_online_eval_snapshot(
+            question,
+            full_answer,
+            latest_retrieved_results,
+            latest_reranked_results,
+            elapsed_ms,
+        )
         payload = emit(new_history, new_log_history, full_answer, manager_messages=persisted_history)
         if payload is not None:
             yield payload
@@ -1317,310 +1421,210 @@ def answer_question_task(question, history, top_k_ret, top_k_comp, threshold, mu
 initial_conversation_state = _get_conversation_state()
 initial_conversation_messages = initial_conversation_state.get("messages", [])
 
+ROOT_DIR = Path(__file__).resolve().parent
+ASSET_FILES = {"lightweightrag.css", "lightweightrag.js"}
+ONLINE_EVAL_PLACEHOLDER = generate_online_eval_html(None)
 
-with gr.Blocks(title="大模型/RAG/AI开发知识体系轻量问答系统", theme=gr.themes.Soft()) as demo:
-    gr.Markdown("# 大模型/RAG/AI开发知识体系轻量问答系统")
+PRESET_OPTIONS = {
+    "均衡（默认）": {
+        "top_k_ret": DEFAULT_TOP_K,
+        "top_k_comp": DEFAULT_TOP_K_COMPRESSED,
+        "threshold": DEFAULT_THRESHOLD,
+    },
+    "快速": {
+        "top_k_ret": 3,
+        "top_k_comp": 2,
+        "threshold": 0.45,
+    },
+    "深入": {
+        "top_k_ret": 8,
+        "top_k_comp": 5,
+        "threshold": 0.2,
+    },
+}
 
-    with gr.Tabs():
-        with gr.TabItem("对话问答"):
-            with gr.Row():
-                with gr.Column(scale=3):
-                    chatbot = gr.Chatbot(
-                        label="对话记录",
-                        height=500,
-                        show_copy_button=True,
-                        type="messages",
-                        value=initial_conversation_messages,
-                    )
-                    with gr.Row():
-                        msg_input = gr.Textbox(
-                            label="问题",
-                            placeholder="输入你的问题...",
-                            scale=4,
-                            container=False,
-                        )
-                        submit_btn = gr.Button("发送", variant="primary", scale=1)
-                    clear_btn = gr.Button("清空对话", size="sm")
-                    with gr.Row(visible=False) as clear_confirm_row:
-                        gr.Markdown("确认清空当前全部对话历史吗？此操作不可撤销。")
-                        clear_confirm_btn = gr.Button("确认清空", variant="stop")
-                        clear_cancel_btn = gr.Button("取消")
 
-                with gr.Column(scale=1):
-                    gr.Markdown("### 检索设置")
-                    preset_dropdown = gr.Dropdown(
-                        choices=["均衡（默认）", "快速", "深入"],
-                        value="均衡（默认）",
-                        label="参数预设",
-                    )
-                    top_k_ret_slider = gr.Slider(1, 50, value=DEFAULT_TOP_K, step=1, label="召回数量")
-                    top_k_comp_slider = gr.Slider(1, 20, value=DEFAULT_TOP_K_COMPRESSED, step=1, label="重排数量")
-                    threshold_slider = gr.Slider(0.0, 1.0, value=DEFAULT_THRESHOLD, step=0.05, label="分数阈值")
-                    multi_turn_toggle = gr.Checkbox(label="启用多轮上下文", value=True)
+def _build_initial_page_state():
+    return {
+        "page_title": "RAG/检索增强技术问答系统",
+        "preset_default": "均衡（默认）",
+        "top_k_ret_default": DEFAULT_TOP_K,
+        "top_k_comp_default": DEFAULT_TOP_K_COMPRESSED,
+        "threshold_default": DEFAULT_THRESHOLD,
+        "multi_turn_default": True,
+        "chatbot": _get_conversation_messages(),
+        "log_history_state": [],
+        "current_process_log": "",
+        "log_html_display": generate_logs_html([]),
+        "retrieval_results_html": generate_retrieval_html([], []),
+        "citation_preview_html": generate_citation_preview_html("", []),
+        "online_eval_html": generate_online_eval_html(None),
+        "knowledge_base_status_html": generate_knowledge_base_status_html(),
+        "build_report_html": generate_build_report_html(get_last_build_report()),
+        "doc_dir": str(DOC_DIR),
+        "chunk_size_default": CHUNK_SIZE_DEFAULT,
+        "chunk_overlap_default": CHUNK_OVERLAP_DEFAULT,
+        "build_status": "",
+        "build_log": "",
+    }
 
-            gr.Markdown("### 处理历史")
-            log_history_state = gr.State([])
-            workflow_html = gr.HTML(
-                value=generate_system_workflow_html(),
-                label="系统流程",
-            )
-            log_html_display = gr.HTML(
-                value="<div style='color: #888; font-style: italic;'>暂无历史记录。</div>",
-                label="历史记录列表",
-            )
-            current_process_log = gr.Textbox(
-                label="当前处理日志",
-                lines=5,
-                max_lines=8,
-                interactive=False,
-                visible=True,
-            )
-            conversation_debug_log = gr.Textbox(
-                label="多轮调试信息",
-                lines=8,
-                max_lines=14,
-                interactive=False,
-                visible=True,
-            )
-            retrieval_results_html = gr.HTML(
-                value=generate_retrieval_html([], []),
-                label="检索结果",
-            )
-            citation_preview_html = gr.HTML(
-                value=generate_citation_preview_html("", []),
-                label="引用预览",
-            )
 
-        with gr.TabItem("对话历史管理"):
-            gr.Markdown("### 历史管理")
-            session_state_html = gr.HTML(
-                value=generate_conversation_state_html(initial_conversation_state),
-                label="会话状态",
-            )
-            history_manager_html = gr.HTML(
-                value=generate_conversation_history_manager_html(initial_conversation_messages),
-                label="历史预览",
-            )
-            history_editor = gr.Code(
-                label="历史编辑（JSON）",
-                value=_serialize_history_editor(initial_conversation_messages),
-                language="json",
-                lines=24,
-                interactive=True,
-            )
-            history_manager_status = gr.Textbox(
-                label="历史管理状态",
-                value="已加载当前持久化会话历史。",
-                interactive=False,
-            )
-            with gr.Row():
-                load_history_btn = gr.Button("重新加载历史")
-                save_history_btn = gr.Button("保存历史修改", variant="primary")
+def _tuple_to_chat_payload(payload_tuple):
+    if not isinstance(payload_tuple, (list, tuple)) or len(payload_tuple) < 12:
+        raise ValueError("Unexpected chat payload format.")
 
-        with gr.TabItem("知识库构建"):
-            gr.Markdown("### 构建 / 重建索引")
-            knowledge_base_status_html = gr.HTML(
-                value=generate_knowledge_base_status_html(),
-                label="知识库状态",
-            )
-            build_report_html = gr.HTML(
-                value=generate_build_report_html(),
-                label="构建报告",
-            )
-            with gr.Row():
-                with gr.Column():
-                    dir_input = gr.Textbox(label="文档目录", value=str(DOC_DIR))
-                    chunk_size_input = gr.Number(label="分块大小", value=CHUNK_SIZE_DEFAULT, precision=0)
-                    overlap_input = gr.Number(label="分块重叠", value=CHUNK_OVERLAP_DEFAULT, precision=0)
-                    build_btn = gr.Button("构建索引", variant="primary")
-                    refresh_status_btn = gr.Button("刷新知识库状态")
-                with gr.Column():
-                    build_status = gr.Textbox(label="构建状态", interactive=False)
-                    build_log = gr.Textbox(label="构建日志", lines=15, interactive=False)
+    return {
+        "chatbot": payload_tuple[1],
+        "log_history_state": payload_tuple[2],
+        "current_process_log": payload_tuple[4],
+        "log_html_display": payload_tuple[6],
+        "retrieval_results_html": payload_tuple[7],
+        "citation_preview_html": payload_tuple[8],
+        "online_eval_html": payload_tuple[12] if len(payload_tuple) > 12 else generate_online_eval_html(None),
+    }
 
-    def process_and_update(question, history, k1, k2, th, multi_turn_enabled, log_state):
-        yield from answer_question_task(question, history, k1, k2, th, multi_turn_enabled, log_state)
 
-    busy_control_outputs = [
-        msg_input,
-        submit_btn,
-        clear_btn,
-        clear_confirm_btn,
-        clear_cancel_btn,
-        load_history_btn,
-        save_history_btn,
-        history_editor,
-        build_btn,
-        refresh_status_btn,
-    ]
+def _safe_int(value, default):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
 
-    preset_dropdown.change(
-        fn=apply_parameter_preset,
-        inputs=[preset_dropdown],
-        outputs=[top_k_ret_slider, top_k_comp_slider, threshold_slider],
-    )
 
-    msg_input.submit(
-        fn=lock_controls_for_chat,
-        inputs=None,
-        outputs=busy_control_outputs,
-        queue=False,
-    ).then(
-        fn=process_and_update,
-        inputs=[msg_input, chatbot, top_k_ret_slider, top_k_comp_slider, threshold_slider, multi_turn_toggle, log_history_state],
-        outputs=[
-            msg_input,
-            chatbot,
+def _safe_float(value, default):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_bool(value, default=True):
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in {"1", "true", "yes", "on"}:
+            return True
+        if text in {"0", "false", "no", "off"}:
+            return False
+    return default
+
+
+def _chat_stream_generator(payload):
+    question = payload.get("question", "")
+    history = payload.get("history", _get_conversation_messages())
+    log_history_state = payload.get("log_history_state", [])
+
+    top_k_ret = _safe_int(payload.get("top_k_ret"), DEFAULT_TOP_K)
+    top_k_comp = _safe_int(payload.get("top_k_comp"), DEFAULT_TOP_K_COMPRESSED)
+    threshold = _safe_float(payload.get("threshold"), DEFAULT_THRESHOLD)
+    multi_turn_enabled = _safe_bool(payload.get("multi_turn_enabled"), True)
+    request_id = str(payload.get("request_id", "")).strip() or str(uuid.uuid4())
+
+    try:
+        for update in answer_question_task(
+            question,
+            history,
+            top_k_ret,
+            top_k_comp,
+            threshold,
+            multi_turn_enabled,
             log_history_state,
-            workflow_html,
-            current_process_log,
-            conversation_debug_log,
-            log_html_display,
-            retrieval_results_html,
-            citation_preview_html,
-            history_manager_html,
-            session_state_html,
-            history_manager_status,
-        ],
-    ).then(
-        fn=unlock_controls,
-        inputs=None,
-        outputs=busy_control_outputs,
-        queue=False,
+            request_id=request_id,
+        ):
+            if update is None:
+                continue
+            yield json.dumps(
+                {"type": "update", "data": _tuple_to_chat_payload(update)},
+                ensure_ascii=False,
+            ) + "\n"
+    except Exception as exc:
+        yield json.dumps({"type": "error", "error": str(exc)}, ensure_ascii=False) + "\n"
+
+
+app = Flask(__name__, template_folder=str(ROOT_DIR))
+
+
+@app.get("/")
+def index_page():
+    return render_template(
+        "index.html",
+        initial_state=_build_initial_page_state(),
+        presets=PRESET_OPTIONS,
     )
 
-    submit_btn.click(
-        fn=lock_controls_for_chat,
-        inputs=None,
-        outputs=busy_control_outputs,
-        queue=False,
-    ).then(
-        fn=process_and_update,
-        inputs=[msg_input, chatbot, top_k_ret_slider, top_k_comp_slider, threshold_slider, multi_turn_toggle, log_history_state],
-        outputs=[
-            msg_input,
-            chatbot,
-            log_history_state,
-            workflow_html,
-            current_process_log,
-            conversation_debug_log,
-            log_html_display,
-            retrieval_results_html,
-            citation_preview_html,
-            history_manager_html,
-            session_state_html,
-            history_manager_status,
-        ],
-    ).then(
-        fn=unlock_controls,
-        inputs=None,
-        outputs=busy_control_outputs,
-        queue=False,
+
+@app.get("/assets/<path:filename>")
+def serve_asset(filename):
+    if filename not in ASSET_FILES:
+        abort(404)
+    return send_from_directory(ROOT_DIR, filename)
+
+
+@app.post("/api/chat/stream")
+def chat_stream_api():
+    payload = request.get_json(silent=True) or {}
+    return Response(
+        stream_with_context(_chat_stream_generator(payload)),
+        mimetype="application/x-ndjson; charset=utf-8",
+        headers={"Cache-Control": "no-cache, no-transform"},
     )
 
-    clear_btn.click(
-        fn=request_clear_conversation_confirmation,
-        inputs=None,
-        outputs=[clear_btn, clear_confirm_row],
-        queue=False,
+
+@app.post("/api/conversation/clear")
+def clear_conversation_api():
+    reset_conversation_session()
+    return jsonify(
+        {
+            "chatbot": _get_conversation_messages(),
+            "log_history_state": [],
+            "current_process_log": "",
+            "log_html_display": generate_logs_html([]),
+            "retrieval_results_html": generate_retrieval_html([], []),
+            "citation_preview_html": generate_citation_preview_html("", []),
+            "online_eval_html": generate_online_eval_html(None),
+        }
     )
 
-    clear_cancel_btn.click(
-        fn=cancel_clear_conversation_confirmation,
-        inputs=None,
-        outputs=[clear_btn, clear_confirm_row],
-        queue=False,
+
+@app.get("/api/knowledge-base/panels")
+def knowledge_base_panels_api():
+    knowledge_base_status_html, build_report_html = refresh_knowledge_base_panels()
+    return jsonify(
+        {
+            "knowledge_base_status_html": knowledge_base_status_html,
+            "build_report_html": build_report_html,
+        }
     )
 
-    clear_confirm_btn.click(
-        fn=confirm_reset_conversation_session,
-        inputs=None,
-        outputs=[
-            chatbot,
-            log_history_state,
-            history_editor,
-            history_manager_html,
-            session_state_html,
-            workflow_html,
-            current_process_log,
-            conversation_debug_log,
-            log_html_display,
-            retrieval_results_html,
-            citation_preview_html,
-            history_manager_status,
-            clear_btn,
-            clear_confirm_row,
-        ],
-        queue=False,
+
+@app.post("/api/knowledge-base/build")
+def knowledge_base_build_api():
+    payload = request.get_json(silent=True) or {}
+    source_dir = payload.get("source_dir", str(DOC_DIR))
+    chunk_size = payload.get("chunk_size", CHUNK_SIZE_DEFAULT)
+    overlap = payload.get("overlap", CHUNK_OVERLAP_DEFAULT)
+
+    build_status, build_log, knowledge_base_status_html, build_report_html = build_knowledge_base_task_with_doc_preprocess(
+        source_dir,
+        chunk_size,
+        overlap,
     )
 
-    load_history_btn.click(
-        fn=load_conversation_manager_views,
-        inputs=None,
-        outputs=[chatbot, history_editor, history_manager_html, session_state_html, history_manager_status],
-        queue=False,
-    )
-
-    save_history_btn.click(
-        fn=save_history_edits,
-        inputs=[history_editor],
-        outputs=[chatbot, history_editor, history_manager_html, session_state_html, history_manager_status],
-    )
-
-    build_btn.click(
-        fn=lock_controls_for_build,
-        inputs=None,
-        outputs=busy_control_outputs,
-        queue=False,
-    ).then(
-        fn=build_knowledge_base_task_with_doc_preprocess,
-        inputs=[dir_input, chunk_size_input, overlap_input],
-        outputs=[build_status, build_log, knowledge_base_status_html, build_report_html],
-    ).then(
-        fn=unlock_controls,
-        inputs=None,
-        outputs=busy_control_outputs,
-        queue=False,
-    )
-
-    refresh_status_btn.click(
-        fn=refresh_knowledge_base_panels,
-        inputs=None,
-        outputs=[knowledge_base_status_html, build_report_html],
-        queue=False,
+    return jsonify(
+        {
+            "build_status": build_status,
+            "build_log": build_log,
+            "knowledge_base_status_html": knowledge_base_status_html,
+            "build_report_html": build_report_html,
+        }
     )
 
 
 if __name__ == "__main__":
+    host = "0.0.0.0"
+    port = 7860
+    local_url = f"http://127.0.0.1:{port}"
     print("系统启动中，请稍候...")
-    local_url = "http://127.0.0.1:7860"
-    try:
-        launch_result = demo.launch(
-            server_name="0.0.0.0",
-            server_port=7860,
-            quiet=True,
-            prevent_thread_lock=True,
-        )
-    except TypeError:
-        try:
-            launch_result = demo.launch(
-                server_name="0.0.0.0",
-                server_port=7860,
-                prevent_thread_lock=True,
-            )
-        except TypeError:
-            launch_result = demo.launch(server_name="0.0.0.0", server_port=7860)
-
-    if isinstance(launch_result, tuple) and len(launch_result) >= 2 and launch_result[1]:
-        local_url = str(launch_result[1]).rstrip("/")
-    elif getattr(demo, "local_url", None):
-        local_url = str(demo.local_url).rstrip("/")
-
     print(f"启动成功，Web 界面地址：{local_url}")
-
-    try:
-        while True:
-            time.sleep(3600)
-    except KeyboardInterrupt:
-        print("程序已停止。")
-
+    app.run(host=host, port=port, debug=False, use_reloader=False)
