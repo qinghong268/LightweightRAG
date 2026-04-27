@@ -12,7 +12,6 @@ from .config_imports import (
     FAISS_INDEX_FILE,
     METADATA_FILE,
     MIN_RETRIEVE_KEEP,
-    OLLAMA_COMPRESSOR_TEMPERATURE_DEFAULT,
     logger,
 )
 from .rag_exceptions import SnapshotLoadError
@@ -28,10 +27,9 @@ except ImportError:
 
 
 class RAGQuerier:
-    def __init__(self, ollama_host: str, chat_model: str, compressor_model: str, reranker_model_name: str):
+    def __init__(self, ollama_host: str, chat_model: str, reranker_model_name: str):
         self._ollama_host = ollama_host
         self._chat_model = chat_model
-        self._compressor_model = compressor_model
         self._reranker_model_name = reranker_model_name
         self._reranker_model_path = f"./models/{reranker_model_name}"
         self._reranker = None
@@ -163,30 +161,12 @@ class RAGQuerier:
             return complete_results[:keep_n]
         return threshold_hits[:top_k]
 
-    def compress_contexts(
-        self,
-        retrieved_results: List[Dict[str, Any]],
-        compressor_model: str = None,
-        temperature: float = OLLAMA_COMPRESSOR_TEMPERATURE_DEFAULT,
-    ) -> str:
-        if not retrieved_results:
-            return ""
-        if compressor_model is None:
-            compressor_model = self._compressor_model
-
-        messages = prompts.get_compress_prompt_template(retrieved_results)
-        return RAGHelpers._chat_completion(self._ollama_host, messages, compressor_model, temperature)
-
     def prepare_final_prompt(
         self,
         question: str,
         contexts: List[Dict[str, Any]],
-        compressed_context: str,
+        context_text: str,
         history_text: str = "",
     ) -> List[dict]:
-        context_text = (
-            compressed_context
-            if compressed_context.strip()
-            else "\n".join([item["content"] for item in contexts])
-        )
+        context_text = context_text if context_text.strip() else "\n".join([item["content"] for item in contexts])
         return prompts.get_rag_prompt_template(context_text, question, history_text)

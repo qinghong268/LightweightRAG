@@ -45,7 +45,7 @@ def _safe_float(value: Any, default: float) -> float:
 
 def _tokenize_text(text: str) -> List[str]:
     text = str(text or "").lower()
-    # Mixed tokenizer: keeps CJK as single tokens and groups Latin/numeric words.
+
     return re.findall(r"[\u3400-\u9fff]|[a-z0-9]+", text)
 
 
@@ -266,7 +266,7 @@ def _compute_ranking_metrics(
         "precision_at_k": precision,
         "mrr_at_k": mrr,
         "ndcg_at_k": ndcg,
-        # RAG naming aliases (commonly used in evaluation dashboards)
+
         "context_recall_at_k": recall,
         "context_precision_at_k": precision,
         "retrieved_relevant_count": float(hit_count),

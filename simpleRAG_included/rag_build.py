@@ -104,7 +104,7 @@ class RAGBuilder:
         if model_to_use is None:
             raise BuildError("No embedding model available for knowledge base build")
 
-        embeddings: List[List[float]] = [None] * len(texts)  # type: ignore[list-item]
+        embeddings: List[List[float]] = [None] * len(texts)
         missing_indices: List[int] = []
         missing_texts: List[str] = []
 

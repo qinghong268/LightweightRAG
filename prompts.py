@@ -7,6 +7,10 @@ SYSTEM_PROMPT = """
 当你陈述由知识片段支持的事实时，必须在句子末尾附上 [source=PATH#chunkN] 格式的引用。
 直接回答用户问题，不要写“根据检索到的知识片段……”“以下是基于这些信息的整理和回答……”这类前言。
 不要输出 "---" 这类分隔线，不要为了排版加入大量空行或空格。
+回答要紧凑：默认使用 3-5 条要点或 150-300 个中文字，不要展开成教程式长文。
+每条要点只表达一个核心意思，避免重复铺陈、宽泛背景和无来源的延伸判断。
+除非用户明确要求代码、示例代码、API 调用或实现细节，否则不要输出代码块、伪代码、import 语句或命令行示例。
+不要在结尾添加“如果需要进一步了解……”这类泛化追问或服务式收尾。
 如果检索片段不足以支持回答，请明确说明，不要猜测。
 对话历史只用于理解代词、上下文指代和追问关系，除非相同信息也被检索片段支持，否则不要把对话历史当作事实来源。
 如果用户询问的是对话本身，例如“上一个问题是什么”“上一条回答是什么”，可以直接基于对话历史回答，此时引用可以省略。
@@ -88,27 +92,8 @@ def get_rag_prompt_template(
                 f"Recent conversation:\n{history_section}\n\n"
                 f"Retrieved knowledge snippets:\n{context_text}\n\n"
                 f"Current user question:\n{question}\n\n"
-                "Answer the current user question using the retrieved snippets and include citations."
-            ),
-        },
-    ]
-
-
-def get_compress_prompt_template(retrieved_results: List[Dict[str, Any]]) -> List[dict]:
-    input_text = ""
-    for item in retrieved_results:
-        input_text += f"[Source: {item['path']}#chunk{item['chunk_index']}] {item['content']}\n\n"
-
-    return [
-        {
-            "role": "system",
-            "content": COMPRESS_SYSTEM_PROMPT,
-        },
-        {
-            "role": "user",
-            "content": (
-                "Compress the following retrieved snippets into a concise, citation-preserving summary:\n\n"
-                f"{input_text}"
+                "Answer the current user question using the retrieved snippets and include citations. "
+                "Keep the answer concise. Do not include code examples unless the user explicitly asks for code."
             ),
         },
     ]

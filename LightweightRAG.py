@@ -26,7 +26,6 @@ from flask import (
     stream_with_context,
 )
 
-os.environ.setdefault("GRADIO_ANALYTICS_ENABLED", "False")
 os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
 os.environ.setdefault("NO_COLOR", "1")
 
@@ -35,9 +34,6 @@ for noisy_logger_name in (
     "httpx",
     "httpcore",
     "urllib3",
-    "gradio",
-    "gradio.analytics",
-    "gradio.networking",
     "faiss",
     "faiss.loader",
 ):
@@ -63,7 +59,6 @@ try:
         CHAT_MODEL,
         CHUNK_OVERLAP_DEFAULT,
         CHUNK_SIZE_DEFAULT,
-        COMPRESSOR_MODEL,
         CONVERSATION_STATE_FILE,
         DB_PATH,
         DEFAULT_THRESHOLD,
@@ -170,12 +165,6 @@ def parse_debug_event(text):
     return payload
 
 
-def format_debug_content(content):
-    if isinstance(content, str):
-        return content.strip()
-    return json.dumps(content, ensure_ascii=False, indent=2)
-
-
 def localize_reranker_status(status):
     status_map = {
         "pending": "待处理",
@@ -261,61 +250,6 @@ def generate_retrieval_html(retrieved_results, reranked_results):
     )
 
 
-def generate_citation_preview_html(answer_text, source_results):
-    source_results = source_results or []
-    matches = re.findall(r"source=([^\],#]+)#chunk(\d+)", answer_text or "", flags=re.IGNORECASE)
-    if not matches:
-        return "<div style='color: #888; font-style: italic;'>最新回答里还没有引用。</div>"
-
-    lookup = {
-        (str(item.get("path", "")).strip(), str(item.get("chunk_index", "")).strip()): item
-        for item in source_results
-    }
-    unique_matches = []
-    seen = set()
-    for path, chunk_index in matches:
-        key = (path.strip(), chunk_index.strip())
-        if key not in seen:
-            seen.add(key)
-            unique_matches.append(key)
-
-    nav_links = []
-    cards = []
-    for index_id, (path, chunk_index) in enumerate(unique_matches, start=1):
-        anchor = f"citation-{index_id}"
-        label = html.escape(f"{Path(path).name}#chunk{chunk_index}")
-        nav_links.append(f"<a href='#{anchor}' style='margin-right: 10px;'>{label}</a>")
-        item = lookup.get((path, chunk_index))
-        snippet = html.escape(
-            str(item.get("content", "当前召回结果中没有可预览的内容。"))
-            if item
-            else "当前召回结果中没有可预览的内容。"
-        )
-        full_path = html.escape(path)
-        cards.append(
-            f"""
-            <div id="{anchor}" style="border: 1px solid #e5e7eb; border-radius: 8px; margin-top: 10px; background: #fff;">
-                <div style="padding: 10px; font-weight: 700; border-bottom: 1px solid #e5e7eb;">
-                    {label}
-                </div>
-                <div style="padding: 10px; color: #6b7280; font-size: 0.9em;">{full_path}</div>
-                <div style="padding: 10px; white-space: pre-wrap; font-family: monospace; font-size: 0.85em;">
-{snippet}
-                </div>
-            </div>
-            """
-        )
-
-    return (
-        "<div>"
-        "<div style='font-weight: 700; margin-bottom: 8px;'>引用导航</div>"
-        f"<div style='margin-bottom: 8px;'>{''.join(nav_links)}</div>"
-        f"{''.join(cards)}"
-        "</div>"
-    )
-
-
-
 def _to_project_relative_path(path_text):
     raw = str(path_text or "").strip()
     if not raw:
@@ -361,10 +295,10 @@ def _compute_online_eval_snapshot(question, answer_text, retrieved_results, rera
     citation_coverage = (matched_citations / citation_total) if citation_total > 0 else 0.0
     compression_ratio = (reranked_count / float(retrieved_count)) if retrieved_count > 0 else 0.0
 
-    # Online proxy metrics for the current turn only.
-    # recall@K: matched citations over retrieved candidates in this turn
-    # precision@K: matched citations over reranked kept candidates in this turn
-    # hit@K: whether at least one citation hits this-turn evidence
+
+
+
+
     hit_rate_at_k = 1.0 if matched_citations > 0 else 0.0
     recall_at_k = min(1.0, (matched_citations / float(retrieved_count))) if retrieved_count > 0 else 0.0
     precision_at_k = min(1.0, (matched_citations / float(reranked_count))) if reranked_count > 0 else 0.0
@@ -754,7 +688,6 @@ def generate_knowledge_base_status_html():
         <div style="padding: 12px; border: 1px solid #e5e7eb; border-radius: 8px; background: #fff;">
             <div style="font-weight: 700; margin-bottom: 6px;">模型信息</div>
             <div>对话模型：{html.escape(CHAT_MODEL)}</div>
-            <div>压缩模型：{html.escape(COMPRESSOR_MODEL)}</div>
             <div>嵌入模型：{html.escape(EMBEDDING_MODEL)}</div>
             <div>重排模型：{html.escape(RERANK_MODEL)}</div>
         </div>
@@ -762,31 +695,7 @@ def generate_knowledge_base_status_html():
     """
 
 
-def apply_parameter_preset(preset_name):
-    presets = {
-        "均衡（默认）": (DEFAULT_TOP_K, DEFAULT_TOP_K_COMPRESSED, DEFAULT_THRESHOLD),
-        "快速": (3, 2, 0.45),
-        "深入": (8, 5, 0.2),
-    }
-    return presets.get(
-        preset_name,
-        (DEFAULT_TOP_K, DEFAULT_TOP_K_COMPRESSED, DEFAULT_THRESHOLD),
-    )
-
-
 conversation_store = ConversationStore(CONVERSATION_STATE_FILE)
-DEBUG_EVENT_LABELS = {
-    "cache_status": "缓存状态",
-    "history_mode": "历史模式",
-    "history_summary": "历史摘要",
-    "retrieval_history": "检索历史",
-    "rewrite_mode": "改写模式",
-    "rewritten_query": "改写结果",
-    "retrieved_results": "召回结果",
-    "reranked_results": "重排结果",
-}
-
-
 ANSWER_REPLACE_MARKER = getattr(simpleRAG_content.SimpleRAG, "ANSWER_REPLACE_MARKER", None)
 
 def _get_conversation_state():
@@ -822,161 +731,8 @@ def _should_persist_answer(answer_text):
     return bool(str(answer_text or "").strip()) and not simpleRAG_content.is_non_persistent_assistant_message(answer_text)
 
 
-def _serialize_history_editor(messages):
-    return json.dumps(messages or [], ensure_ascii=False, indent=2)
-
-
-def generate_conversation_state_html(state=None):
-    state = state or _get_conversation_state()
-    session_id = str(state.get("active_session_id", ""))
-    updated_at = state.get("updated_at") or "暂无"
-    messages = state.get("messages", [])
-    return f"""
-    <div style="padding: 12px; border: 1px solid #e5e7eb; border-radius: 10px; background: #ffffff;">
-        <div style="font-weight: 700; margin-bottom: 6px;">当前会话状态</div>
-        <div>会话 ID：{html.escape(session_id)}</div>
-        <div>消息条数：{len(messages)}</div>
-        <div>最近保存时间：{html.escape(str(updated_at))}</div>
-    </div>
-    """
-
-
-def generate_conversation_history_manager_html(messages):
-    if not messages:
-        return "<div style='color: #888; font-style: italic;'>当前没有已保存的历史对话。</div>"
-
-    cards = []
-    for index_id, item in enumerate(messages, start=1):
-        role = "用户" if item.get("role") == "user" else "助手"
-        content = html.escape(str(item.get("content", "")))
-        cards.append(
-            f"""
-            <details style="border: 1px solid #e5e7eb; border-radius: 8px; margin-bottom: 8px; background: #ffffff;">
-                <summary style="padding: 10px; cursor: pointer; font-weight: 600;">
-                    #{index_id} {role}
-                </summary>
-                <div style="padding: 10px; border-top: 1px solid #e5e7eb; white-space: pre-wrap; font-family: monospace; font-size: 0.85em;">
-{content}
-                </div>
-            </details>
-            """
-        )
-    return "".join(cards)
-
-
-def load_conversation_manager_views():
-    state = _get_conversation_state()
-    messages = state.get("messages", [])
-    return (
-        messages,
-        _serialize_history_editor(messages),
-        generate_conversation_history_manager_html(messages),
-        generate_conversation_state_html(state),
-        "已加载当前持久化会话历史。",
-    )
-
-
-def build_conversation_manager_views(messages, status_text):
-    state = _get_conversation_state()
-    preview_state = {
-        **state,
-        "messages": messages,
-    }
-    return (
-        _serialize_history_editor(messages),
-        generate_conversation_history_manager_html(messages),
-        generate_conversation_state_html(preview_state),
-        status_text,
-    )
-
-
-def _validate_history_messages(parsed):
-    if not isinstance(parsed, list):
-        return None, "历史编辑内容必须是 JSON 数组。"
-
-    validated = []
-    for index, item in enumerate(parsed, start=1):
-        if not isinstance(item, dict):
-            return None, f"第 {index} 条消息必须是 JSON 对象，格式应为 {{\"role\": \"user\", \"content\": \"...\"}}。"
-
-        if "role" not in item:
-            return None, f"第 {index} 条消息缺少 role 字段。"
-        if "content" not in item:
-            return None, f"第 {index} 条消息缺少 content 字段。"
-
-        role = item.get("role")
-        content = item.get("content")
-
-        if not isinstance(role, str):
-            return None, f"第 {index} 条消息的 role 必须是字符串。"
-        role = role.strip()
-        if role not in {"user", "assistant"}:
-            return None, f"第 {index} 条消息的 role 只能是 user 或 assistant。"
-
-        if not isinstance(content, str):
-            return None, f"第 {index} 条消息的 content 必须是字符串。"
-        content = content.strip()
-        if not content:
-            return None, f"第 {index} 条消息的 content 不能为空。"
-
-        validated.append({"role": role, "content": content})
-
-    return validated, None
-
-
-def save_history_edits(history_editor_text):
-    state = _get_conversation_state()
-    messages = state.get("messages", [])
-
-    try:
-        parsed = json.loads(history_editor_text or "[]")
-    except json.JSONDecodeError as exc:
-        return (
-            messages,
-            history_editor_text,
-            generate_conversation_history_manager_html(messages),
-            generate_conversation_state_html(state),
-            f"保存编辑失败：JSON 解析错误（第 {exc.lineno} 行，第 {exc.colno} 列）：{exc.msg}",
-        )
-
-    validated_messages, validation_error = _validate_history_messages(parsed)
-    if validation_error:
-        return (
-            messages,
-            history_editor_text,
-            generate_conversation_history_manager_html(messages),
-            generate_conversation_state_html(state),
-            f"保存编辑失败：{validation_error}",
-        )
-
-    saved_state = conversation_store.set_messages(validated_messages)
-    saved_messages = saved_state.get("messages", [])
-    return (
-        saved_messages,
-        _serialize_history_editor(saved_messages),
-        generate_conversation_history_manager_html(saved_messages),
-        generate_conversation_state_html(saved_state),
-        "历史修改已保存，后续对话会基于新的历史内容继续。",
-    )
-
-
 def reset_conversation_session():
-    state = conversation_store.reset_session()
-    messages = state.get("messages", [])
-    return (
-        messages,
-        [],
-        _serialize_history_editor(messages),
-        generate_conversation_history_manager_html(messages),
-        generate_conversation_state_html(state),
-        generate_system_workflow_html(),
-        "",
-        "",
-        "<div style='color: #888; font-style: italic;'>暂无历史记录。</div>",
-        generate_retrieval_html([], []),
-        generate_citation_preview_html("", []),
-        "已清空当前会话，并创建新的会话 ID。",
-    )
+    return conversation_store.reset_session()
 
 
 class OutputLogger:
@@ -1202,34 +958,20 @@ def answer_question_task(question, history, top_k_ret, top_k_comp, threshold, mu
         multi_turn_enabled=multi_turn_enabled,
     )
     current_q_logs = ""
-    debug_lines = []
     request_started_at = time.perf_counter()
     final_online_eval_snapshot = None
-    conversation_status_text = "当前会话历史会在回答完成后自动保存。"
 
-    def emit(history_value, log_state_value, answer_text, manager_messages=None):
+    def emit(history_value, log_state_value, answer_text):
         if not _is_request_current(request_session_id, request_id):
             return None
-        manager_source = history_value if manager_messages is None else manager_messages
-        (
-            _history_editor_value,
-            history_manager_value,
-            session_state_value,
-            history_status_value,
-        ) = build_conversation_manager_views(manager_source, conversation_status_text)
         return (
             "",
             history_value,
             log_state_value,
             generate_system_workflow_html(workflow_state),
             clean_log_text(current_q_logs),
-            "\n\n".join(debug_lines),
             generate_logs_html(log_state_value),
             generate_retrieval_html(latest_retrieved_results, latest_reranked_results),
-            generate_citation_preview_html(answer_text, latest_reranked_results or latest_retrieved_results),
-            history_manager_value,
-            session_state_value,
-            history_status_value,
             generate_online_eval_html(final_online_eval_snapshot),
         )
 
@@ -1304,9 +1046,6 @@ def answer_question_task(question, history, top_k_ret, top_k_comp, threshold, mu
                     latest_retrieved_results = content
                 elif event == "reranked_results" and isinstance(content, list):
                     latest_reranked_results = content
-                else:
-                    debug_label = DEBUG_EVENT_LABELS.get(event, event)
-                    debug_lines.append(f"[{debug_label}]\n{format_debug_content(content)}")
                 apply_debug_event_to_workflow_state(workflow_state, event, content)
                 payload = emit(new_history, log_history_state, full_answer)
                 if payload is not None:
@@ -1373,13 +1112,9 @@ def answer_question_task(question, history, top_k_ret, top_k_comp, threshold, mu
                 {"role": "assistant", "content": full_answer},
             ]
             conversation_store.set_messages(final_history)
-            manager_history = final_history
             display_history = final_history
-            conversation_status_text = "当前会话历史已自动保存。"
         else:
-            manager_history = persisted_history
             display_history = new_history
-            conversation_status_text = "本次结果仅作为运行提示显示，未写入历史。"
         log_entry_label = f"{question[:30]}{'...' if len(question) > 30 else ''} ({time.strftime('%H:%M:%S')})"
         new_log_history = [{"label": log_entry_label, "details": clean_log_text(current_q_logs)}] + log_history_state
         if len(new_log_history) > 20:
@@ -1393,7 +1128,7 @@ def answer_question_task(question, history, top_k_ret, top_k_comp, threshold, mu
             latest_reranked_results,
             elapsed_ms,
         )
-        payload = emit(display_history, new_log_history, full_answer, manager_messages=manager_history)
+        payload = emit(display_history, new_log_history, full_answer)
         if payload is not None:
             yield payload
     except Exception as exc:
@@ -1402,7 +1137,6 @@ def answer_question_task(question, history, top_k_ret, top_k_comp, threshold, mu
         workflow_state["final_status"] = "error"
         workflow_state["status_detail"] = f"请求失败：{error_msg}"
         new_history[-1]["content"] = f"{full_answer}\n\n[系统错误]：{error_msg}"
-        conversation_status_text = "本次回答失败，历史未自动写入持久化会话。"
         log_entry_label = f"{question[:30]}...（错误）({time.strftime('%H:%M:%S')})"
         new_log_history = [{"label": log_entry_label, "details": clean_log_text(current_q_logs)}] + log_history_state
         elapsed_ms = (time.perf_counter() - request_started_at) * 1000.0
@@ -1413,17 +1147,12 @@ def answer_question_task(question, history, top_k_ret, top_k_comp, threshold, mu
             latest_reranked_results,
             elapsed_ms,
         )
-        payload = emit(new_history, new_log_history, full_answer, manager_messages=persisted_history)
+        payload = emit(new_history, new_log_history, full_answer)
         if payload is not None:
             yield payload
 
-
-initial_conversation_state = _get_conversation_state()
-initial_conversation_messages = initial_conversation_state.get("messages", [])
-
 ROOT_DIR = Path(__file__).resolve().parent
 ASSET_FILES = {"lightweightrag.css", "lightweightrag.js"}
-ONLINE_EVAL_PLACEHOLDER = generate_online_eval_html(None)
 
 PRESET_OPTIONS = {
     "均衡（默认）": {
@@ -1454,10 +1183,10 @@ def _build_initial_page_state():
         "multi_turn_default": True,
         "chatbot": _get_conversation_messages(),
         "log_history_state": [],
+        "workflow_html": generate_system_workflow_html(),
         "current_process_log": "",
         "log_html_display": generate_logs_html([]),
         "retrieval_results_html": generate_retrieval_html([], []),
-        "citation_preview_html": generate_citation_preview_html("", []),
         "online_eval_html": generate_online_eval_html(None),
         "knowledge_base_status_html": generate_knowledge_base_status_html(),
         "build_report_html": generate_build_report_html(get_last_build_report()),
@@ -1470,17 +1199,17 @@ def _build_initial_page_state():
 
 
 def _tuple_to_chat_payload(payload_tuple):
-    if not isinstance(payload_tuple, (list, tuple)) or len(payload_tuple) < 12:
+    if not isinstance(payload_tuple, (list, tuple)) or len(payload_tuple) < 8:
         raise ValueError("Unexpected chat payload format.")
 
     return {
         "chatbot": payload_tuple[1],
         "log_history_state": payload_tuple[2],
+        "workflow_html": payload_tuple[3],
         "current_process_log": payload_tuple[4],
-        "log_html_display": payload_tuple[6],
-        "retrieval_results_html": payload_tuple[7],
-        "citation_preview_html": payload_tuple[8],
-        "online_eval_html": payload_tuple[12] if len(payload_tuple) > 12 else generate_online_eval_html(None),
+        "log_html_display": payload_tuple[5],
+        "retrieval_results_html": payload_tuple[6],
+        "online_eval_html": payload_tuple[7],
     }
 
 
@@ -1578,10 +1307,10 @@ def clear_conversation_api():
         {
             "chatbot": _get_conversation_messages(),
             "log_history_state": [],
+            "workflow_html": generate_system_workflow_html(),
             "current_process_log": "",
             "log_html_display": generate_logs_html([]),
             "retrieval_results_html": generate_retrieval_html([], []),
-            "citation_preview_html": generate_citation_preview_html("", []),
             "online_eval_html": generate_online_eval_html(None),
         }
     )

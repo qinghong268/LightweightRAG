@@ -81,6 +81,10 @@
 
                 <div class="section-title">当前处理信息</div>
                 <div class="info-grid">
+                    <div class="panel">
+                        <div class="panel-title">Workflow 流程面板</div>
+                        <div id="workflowHtml" class="scroll-panel-content">{{ initial_state.workflow_html | safe }}</div>
+                    </div>
                     <div class="panel panel-stretch">
                         <div class="panel-title">处理日志</div>
                         <textarea id="currentProcessLog" class="plain-textarea tall-log" readonly>{{ initial_state.current_process_log }}</textarea>

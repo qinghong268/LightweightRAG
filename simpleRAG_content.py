@@ -21,7 +21,6 @@ import prompts
 from simpleRAG_included.config_imports import (
     CACHE_FILE,
     CHAT_MODEL,
-    COMPRESSOR_MODEL,
     DEFAULT_THRESHOLD,
     DEFAULT_TOP_K,
     DEFAULT_TOP_K_COMPRESSED,
@@ -32,7 +31,6 @@ from simpleRAG_included.config_imports import (
     METADATA_FILE,
     MIN_RETRIEVE_KEEP,
     OLLAMA_CHAT_TEMPERATURE_DEFAULT,
-    OLLAMA_COMPRESSOR_TEMPERATURE_DEFAULT,
     OLLAMA_HOST,
     RECENT_HISTORY_TOKEN_BUDGET,
     RERANK_MODEL,
@@ -55,9 +53,7 @@ NON_PERSISTENT_ASSISTANT_PREFIXES = (
     "缓存命中：",
     "Searching and reasoning...",
     "正在检索并推理...",
-    "Compressing retrieved context",
     "开始压缩召回上下文",
-    "Skipping context compression",
     "Retrieval context prepared:",
     "Retrieval query:",
     "跳过召回上下文压缩",
@@ -80,11 +76,8 @@ NON_PERSISTENT_ASSISTANT_PREFIXES = (
     "查询向量维度：",
     "Reranker status:",
     "重排器状态：",
-    "Compression model:",
     "压缩模型：",
-    "Compressed context:",
     "压缩后的上下文：",
-    "Compression complete",
     "上下文压缩完成",
     "Answer generation model:",
     "回答生成模型：",
@@ -172,13 +165,11 @@ class SimpleRAG:
 
         self._ollama_host = OLLAMA_HOST
         self._chat_model = CHAT_MODEL
-        self._compressor_model = COMPRESSOR_MODEL
 
         self._builder = RAGBuilder(self.cache, embedding_model_instance=self.embedding_model)
         self._querier = RAGQuerier(
             self._ollama_host,
             self._chat_model,
-            self._compressor_model,
             RERANK_MODEL,
         )
         self._querier.set_embedding_model(self.embedding_model)
@@ -392,7 +383,7 @@ class SimpleRAG:
         if not history_text:
             return ""
 
-        # Single-LLM-call mode: skip model-based history summary.
+
         return ""
 
     def _build_history_views(self, history: List[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -534,33 +525,23 @@ class SimpleRAG:
 
 
     def _rewrite_query(self, original_query: str, history_text: str = "") -> str:
-        # Single-LLM-call mode: skip model-based query rewriting.
+
         return original_query
 
     def _rerank_results(self, query: str, results: list, top_k: int = 5) -> list:
         return self._querier._rerank_results(query, results, top_k)
 
-    def compress_contexts(
-        self,
-        retrieved_results: List[Dict[str, Any]],
-        compressor_model: str = None,
-        temperature: float = None,
-    ) -> str:
-        if temperature is None:
-            temperature = OLLAMA_COMPRESSOR_TEMPERATURE_DEFAULT
-        return self._querier.compress_contexts(retrieved_results, compressor_model, temperature)
-
     def prepare_final_prompt(
         self,
         question: str,
         contexts: List[Dict[str, Any]],
-        compressed_context: str,
+        context_text: str,
         history_text: str = "",
     ) -> List[dict]:
         return self._querier.prepare_final_prompt(
             question,
             contexts,
-            compressed_context,
+            context_text,
             history_text,
         )
 
@@ -730,12 +711,12 @@ class SimpleRAG:
             retrieved_results,
             top_k=top_k_compressed,
         )
-        compressed_context = self._build_raw_context(reranked_results)
+        context_text = self._build_raw_context(reranked_results)
 
         messages = self.prepare_final_prompt(
             question,
             reranked_results,
-            compressed_context,
+            context_text,
             history_text=conversation_state["retrieval_history_text"],
         )
         answer = RAGHelpers._chat_completion(
@@ -1039,12 +1020,12 @@ class SimpleRAG:
 
             yield f"输入片段数量：{len(reranked_results)}\n\n"
 
-            compressed_content = self._build_raw_context(reranked_results)
+            context_text = self._build_raw_context(reranked_results)
 
             final_messages = self.prepare_final_prompt(
                 question,
                 reranked_results,
-                compressed_content,
+                context_text,
                 history_text=conversation_state["retrieval_history_text"],
             )
             yield f"回答生成模型：{self._chat_model}\n"
@@ -1126,4 +1107,3 @@ class SimpleRAG:
 
 if __name__ == '__main__':
     print('Please run: python LightweightRAG.py')
-

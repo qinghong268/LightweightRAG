@@ -119,7 +119,7 @@ class SmartTextSplitter:
 
             if similarity >= self.threshold and can_merge_by_length:
                 current_chunk += " " + next_chunk
-                # Approximate merged semantics with the normalized sum of adjacent chunk vectors.
+
                 current_embedding = torch.nn.functional.normalize(
                     current_embedding + next_embedding,
                     p=2,

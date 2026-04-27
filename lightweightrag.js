@@ -26,6 +26,7 @@
         thresholdInput: document.getElementById('thresholdInput'),
         thresholdValue: document.getElementById('thresholdValue'),
         multiTurnInput: document.getElementById('multiTurnInput'),
+        workflowHtml: document.getElementById('workflowHtml'),
         currentProcessLog: document.getElementById('currentProcessLog'),
         logHtmlDisplay: document.getElementById('logHtmlDisplay'),
         retrievalResultsHtml: document.getElementById('retrievalResultsHtml'),
@@ -162,6 +163,7 @@
         state.logHistoryState = Array.isArray(payload.log_history_state) ? payload.log_history_state : [];
 
         renderChatMessages(state.chatbot);
+        setPanelHtml(elements.workflowHtml, payload.workflow_html);
         setInputValue(elements.currentProcessLog, payload.current_process_log);
         setPanelHtml(elements.logHtmlDisplay, payload.log_html_display);
         setPanelHtml(elements.retrievalResultsHtml, payload.retrieval_results_html);
@@ -173,6 +175,7 @@
         state.logHistoryState = Array.isArray(payload.log_history_state) ? payload.log_history_state : [];
 
         renderChatMessages(state.chatbot);
+        setPanelHtml(elements.workflowHtml, payload.workflow_html);
         setInputValue(elements.currentProcessLog, payload.current_process_log);
         setPanelHtml(elements.logHtmlDisplay, payload.log_html_display);
         setPanelHtml(elements.retrievalResultsHtml, payload.retrieval_results_html);
