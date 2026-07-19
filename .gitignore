@@ -201,7 +201,54 @@ cython_debug/
 .cursorignore
 .cursorindexingignore
 
+# Thesis workspace (separate from LightweightRAG core)
+/graduation_thesis/backups/
+/graduation_thesis/documents/*.doc
+/graduation_thesis/documents/*.docx
+/graduation_thesis/reports/
+/graduation_thesis/manuscript/__pycache__/
+/graduation_thesis/figures/__pycache__/
+
+# Legacy thesis paths (pre-reorganize)
+/thesis_backups/
+/王锦鸿论文.pre_*.doc
+/王锦鸿论文.bak_*.doc
+/王锦鸿论文.pre_sp2.doc
+/王锦鸿论文.doc
+/王锦鸿简历.docx
+/另一个题目的范文.docx
+/参考文献.docx
+/PaperXieAIGC检测报告/
+/thesis_manuscript/
+/thesis_figures/
+/requirements_extract/
+/skills/
+/要求/
+
 # Marimo
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# LightweightRAG runtime / large local assets
+models/
+*.bin
+knowledge_base.db
+embedding_cache.json
+conversation_state.json
+metadata.json
+*.pyc
+
+# RAG corpus (keep design/plans tracked; docs/superpowers/ is NOT ignored)
+/docs/download/
+/docs/haystack/
+/docs/huggingface_learn/
+/docs/langchain/
+/docs/llamaindex/
+/docs/qdrant/
+/docs/transformers/
+/docs/*.pdf
+/docs/*.txt
+
+# Local archive / non-repo materials
+/LightweightRAG_旁置材料/
