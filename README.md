@@ -2,9 +2,11 @@
 
 ## 1. 项目简介
 
-本仓库为毕业设计 **《基于 LLM 信息检索增强的智能问答系统设计与实现》**（作者：王锦鸿）的配套工程实现 **LightweightRAG**。
+> **学术与版本说明（请先读）**  
+> 本仓库是毕业论文 **《基于 LLM 信息检索增强的智能问答系统设计与实现》**（作者：王锦鸿）所描述系统在**毕设交付之后的工程迭代版本**，用于后续缺陷修复、依赖兼容与演示维护。  
+> **它不是**提交给学校的原始毕设代码快照，也**不是**论文实验当时的逐文件原样存档。论文中的实验数据、图表与结论以定稿论文（PDF/docx）为准；请勿将本仓库直接等同于「原毕设提交物」用于查重或学术比对。
 
-系统采用「离线构建知识库 + 在线检索问答」架构：本地文档经分块与向量化写入 FAISS / SQLite，用户提问时通过 **bge-m3** 召回、**bge-reranker-v2-m3** 重排序，再调用 **Ollama** 上的 **deepseek-r1:8b** 流式生成答案，并通过 Flask Web 界面展示检索、重排与工作流过程。
+**LightweightRAG** 在上述论文路线上继续演进：采用「离线构建知识库 + 在线检索问答」架构；本地文档经分块与向量化写入 FAISS / SQLite，用户提问时通过 **bge-m3** 召回、**bge-reranker-v2-m3** 重排序，再调用 **Ollama** 上的 **deepseek-r1:8b** 流式生成答案，并通过 Flask Web 界面展示检索、重排与工作流过程。
 
 ## 2. 功能列表
 
@@ -33,12 +35,18 @@
 pip install -r requirements.txt
 ```
 
-若使用 `transformers>=5`，`FlagEmbedding==1.3.5` 可能在导入时报错；本项目已在 `rag_query.py` 中做兼容处理。若仍失败，可降级：`pip install "transformers>=4.44,<5"`，或安装带 v5 兼容的 FlagEmbedding 新版本。
+若使用 `transformers>=5`，`FlagEmbedding==1.3.5` 可能缺少 `is_torch_fx_available` / `prepare_for_model` 等旧 API；本项目已在 `simpleRAG_included/rag_query.py` 中做兼容补丁。若仍失败，可降级：`pip install "transformers>=4.44,<5"`。
 
 SciFact 评测额外需要：
 
 ```powershell
 pip install ir_datasets
+```
+
+本机内存紧张时建议小样本复测（避免长时间全量编码）：
+
+```powershell
+python experiments/public_retrieval_eval.py --max-queries 8 --max-corpus-docs 80 --batch-size 4
 ```
 
 ## 5. 安装 Ollama 并拉取对话模型
