@@ -238,6 +238,7 @@ embedding_cache.json
 conversation_state.json
 metadata.json
 *.pyc
+experiments/results/
 
 # RAG corpus (keep design/plans tracked; docs/superpowers/ is NOT ignored)
 /docs/download/

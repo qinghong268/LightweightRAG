@@ -1,4 +1,4 @@
-# LightweightRAG Complete Implementation Plan
+﻿# LightweightRAG Complete Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 >
@@ -33,7 +33,7 @@
 - Produces: valid UTF-8 docstring on `config.py`
 - Consumes: existing `BASE_DIR`, `LOCAL_EMBEDDING_MODEL_PATH` pattern
 
-- [ ] **Step 1: Restore `测试问题.txt`**
+- [x] **Step 1: Restore `测试问题.txt`**
 
 ```powershell
 Copy-Item -LiteralPath "D:\RAGprojects\LightweightRAG_旁置材料\测试问题.txt" -Destination "D:\RAGprojects\LightweightRAG\测试问题.txt" -Force
@@ -41,7 +41,7 @@ Copy-Item -LiteralPath "D:\RAGprojects\LightweightRAG_旁置材料\测试问题.
 
 Expected: file exists at project root.
 
-- [ ] **Step 2: Ensure `conversation_state.json` exists**
+- [x] **Step 2: Ensure `conversation_state.json` exists**
 
 If archive copy exists, copy it; else write:
 
@@ -53,7 +53,7 @@ If archive copy exists, copy it; else write:
 }
 ```
 
-- [ ] **Step 3: Rewrite `config.py` header + add rerank path**
+- [x] **Step 3: Rewrite `config.py` header + add rerank path**
 
 Replace garbed docstring with:
 
@@ -69,11 +69,11 @@ LOCAL_RERANK_MODEL_PATH = str(BASE_DIR / "models" / "bge-reranker-v2-m3")
 
 Keep all existing numeric defaults unchanged.
 
-- [ ] **Step 4: Export new symbol from `simpleRAG_included/config_imports.py`**
+- [x] **Step 4: Export new symbol from `simpleRAG_included/config_imports.py`**
 
 Add `LOCAL_RERANK_MODEL_PATH` to the import list from `config`.
 
-- [ ] **Step 5: Smoke import**
+- [x] **Step 5: Smoke import**
 
 ```powershell
 python -c "import config; print(config.LOCAL_RERANK_MODEL_PATH); from pathlib import Path; print(Path(config.LOCAL_RERANK_MODEL_PATH).exists())"
@@ -81,7 +81,7 @@ python -c "import config; print(config.LOCAL_RERANK_MODEL_PATH); from pathlib im
 
 Expected: path under `...\models\bge-reranker-v2-m3` and `True` if model dir present.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```powershell
 git add config.py simpleRAG_included/config_imports.py conversation_state.json "测试问题.txt"
@@ -102,7 +102,7 @@ Note: `conversation_state.json` may be gitignored later in Task 3; still create 
 - Consumes: `LOCAL_RERANK_MODEL_PATH` from config / config_imports
 - Produces: `RAGQuerier._reranker_model_path` resolves to absolute local model directory (not `./models/...`)
 
-- [ ] **Step 1: Change path construction**
+- [x] **Step 1: Change path construction**
 
 Replace:
 
@@ -129,7 +129,7 @@ self._reranker_model_path = str(candidate)
 
 Match existing import style in the file (keep relative imports consistent with the package).
 
-- [ ] **Step 2: Unit-style check without loading GPU weights if slow**
+- [x] **Step 2: Unit-style check without loading GPU weights if slow**
 
 ```powershell
 python -c "from simpleRAG_included.rag_query import RAGQuerier; from config import OLLAMA_HOST, CHAT_MODEL, RERANK_MODEL, LOCAL_RERANK_MODEL_PATH; q=RAGQuerier(OLLAMA_HOST, CHAT_MODEL, RERANK_MODEL); print(q._reranker_model_path); print(q._reranker_model_path.replace('\\\\','/').endswith('models/bge-reranker-v2-m3') or 'bge-reranker-v2-m3' in q._reranker_model_path)"
@@ -137,7 +137,7 @@ python -c "from simpleRAG_included.rag_query import RAGQuerier; from config impo
 
 Expected: path contains `models\bge-reranker-v2-m3` and is absolute.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```powershell
 git add simpleRAG_included/rag_query.py
@@ -158,7 +158,7 @@ git commit -m "fix: load reranker from BASE_DIR absolute path"
 - Produces: Chinese README covering install → models → docs → build → run → eval
 - Produces: `requirements.txt` includes Flask (currently missing) and other runtime imports as needed
 
-- [ ] **Step 1: Append project-specific ignores to `.gitignore`**
+- [x] **Step 1: Append project-specific ignores to `.gitignore`**
 
 Add (do not remove existing thesis ignores):
 
@@ -192,7 +192,7 @@ venv/
 
 Ensure `docs/superpowers/` is NOT ignored.
 
-- [ ] **Step 2: Fix `requirements.txt`**
+- [x] **Step 2: Fix `requirements.txt`**
 
 Ensure at least:
 
@@ -214,7 +214,7 @@ python-docx>=1.0.0
 
 (Adjust versions only if import smoke fails; prefer adding missing packages over changing pinned ones unnecessarily.)
 
-- [ ] **Step 3: Write Chinese `README.md`**
+- [x] **Step 3: Write Chinese `README.md`**
 
 Must include sections:
 1. 项目简介（论文题目 + LightweightRAG）
@@ -230,7 +230,7 @@ Must include sections:
 11. **不要提交**的文件清单
 12. 目录结构简表
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```powershell
 git add .gitignore requirements.txt README.md
@@ -249,7 +249,7 @@ git commit -m "docs: add README and ignore local models/indexes for GitHub"
 - Consumes: Tasks 1–3 outputs
 - Produces: verification notes (what passed/failed) and minimal code patches for real gaps only
 
-- [ ] **Step 1: Ollama health**
+- [x] **Step 1: Ollama health**
 
 ```powershell
 curl http://localhost:11434/api/tags
@@ -257,7 +257,7 @@ curl http://localhost:11434/api/tags
 
 Expected: JSON including `deepseek-r1:8b` (or pull it).
 
-- [ ] **Step 2: Start app**
+- [x] **Step 2: Start app**
 
 ```powershell
 python LightweightRAG.py
@@ -265,19 +265,19 @@ python LightweightRAG.py
 
 Expected: Flask listens (note printed host/port); open in browser.
 
-- [ ] **Step 3: Build or confirm KB**
+- [x] **Step 3: Build or confirm KB**
 
 Use Web「构建知识库」or existing index. Expected: panels show chunk counts; no crash.
 
-- [ ] **Step 4: QA smoke with `测试问题.txt`**
+- [x] **Step 4: QA smoke with `测试问题.txt`**
 
 Ask 1–2 questions. Expected: streamed answer + retrieval/rerank panels + workflow updates.
 
-- [ ] **Step 5: Multi-turn + clear**
+- [x] **Step 5: Multi-turn + clear**
 
 Ask a follow-up pronoun question; then clear conversation. Expected: history-aware answer; clear resets UI/state file messages.
 
-- [ ] **Step 6: SciFact attempt**
+- [ ] **Step 6: SciFact attempt**（进行中：缩小语料后台重跑，不阻塞其它交付）
 
 ```powershell
 python experiments/public_retrieval_eval.py
@@ -285,7 +285,7 @@ python experiments/public_retrieval_eval.py
 
 Expected: writes under `experiments/results/` OR documented dependency failure with exact error.
 
-- [ ] **Step 7: Patch only real gaps found; re-smoke critical path; commit**
+- [x] **Step 7: Patch only real gaps found; re-smoke critical path; commit**
 
 ```powershell
 git add -A
@@ -295,7 +295,7 @@ git commit -m "fix: close live verification gaps for full thesis feature path"
 
 (Only stage code/docs; do not force-add ignored models/indexes.)
 
-- [ ] **Step 8: Write handoff checklist for user**
+- [x] **Step 8: Write handoff checklist for user**
 
 In chat reply, list **GitHub 应上传** vs **不要上传** matching `.gitignore` and README.
 
