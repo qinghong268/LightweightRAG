@@ -26,12 +26,21 @@ from .rag_exceptions import SnapshotLoadError
 from .rag_helpers import RAGHelpers
 
 try:
+    # transformers>=5 removed is_torch_fx_available; FlagEmbedding 1.3.x still imports it.
+    import transformers.utils.import_utils as _tf_import_utils
+
+    if not hasattr(_tf_import_utils, "is_torch_fx_available"):
+        _tf_import_utils.is_torch_fx_available = lambda: True  # type: ignore[attr-defined]
+
     from FlagEmbedding import FlagReranker
 
     RERANKER_AVAILABLE = True
-except ImportError:
+except Exception as exc:
     RERANKER_AVAILABLE = False
-    logger.warning("FlagEmbedding is not installed; reranking will be unavailable.")
+    logger.warning(
+        "FlagEmbedding/reranker unavailable (%s); vector Top-K fallback will be used.",
+        exc,
+    )
 
 
 class RAGQuerier:

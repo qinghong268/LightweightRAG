@@ -33,6 +33,8 @@
 pip install -r requirements.txt
 ```
 
+若使用 `transformers>=5`，`FlagEmbedding==1.3.5` 可能在导入时报错；本项目已在 `rag_query.py` 中做兼容处理。若仍失败，可降级：`pip install "transformers>=4.44,<5"`，或安装带 v5 兼容的 FlagEmbedding 新版本。
+
 SciFact 评测额外需要：
 
 ```powershell
