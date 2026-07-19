@@ -1,4 +1,5 @@
 import sqlite3
+from pathlib import Path
 from typing import Any, Dict, List
 
 import faiss
@@ -7,6 +8,13 @@ import torch
 from sentence_transformers import SentenceTransformer
 
 import prompts
+from config import BASE_DIR
+
+try:
+    from config import LOCAL_RERANK_MODEL_PATH
+except ImportError:
+    LOCAL_RERANK_MODEL_PATH = None
+
 from .config_imports import (
     DB_PATH,
     FAISS_INDEX_FILE,
@@ -31,7 +39,10 @@ class RAGQuerier:
         self._ollama_host = ollama_host
         self._chat_model = chat_model
         self._reranker_model_name = reranker_model_name
-        self._reranker_model_path = f"./models/{reranker_model_name}"
+        if LOCAL_RERANK_MODEL_PATH is not None:
+            self._reranker_model_path = LOCAL_RERANK_MODEL_PATH
+        else:
+            self._reranker_model_path = str(Path(BASE_DIR) / "models" / reranker_model_name)
         self._reranker = None
         self.embedding_model = None
 
