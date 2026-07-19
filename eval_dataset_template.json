@@ -1,0 +1,25 @@
+{
+  "samples": [
+    {
+      "id": "q1",
+      "question": "什么是RAG？",
+      "ground_truth_answer": "RAG 是检索增强生成，通过先检索知识再生成答案。",
+      "relevant_chunks": [
+        {
+          "path": "docs/rag_intro.txt",
+          "chunk_index": 0,
+          "relevance": 2
+        },
+        {
+          "path": "docs/rag_intro.txt",
+          "chunk_index": 1,
+          "relevance": 1
+        }
+      ],
+      "top_k_retrieve": 5,
+      "top_k_compressed": 3,
+      "score_threshold": 0.3,
+      "history": []
+    }
+  ]
+}
