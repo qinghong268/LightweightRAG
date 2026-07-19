@@ -1,7 +1,4 @@
-
-"""
-闁板秶鐤嗛弬鍥︽閿涘本顒濋弬鍥︽鐎规矮绠熸禍鍡樺閺堝褰查柊宥囩枂閻ㄥ嫬寮弫鑸偓?
-"""
+"""LightweightRAG configuration: paths, models, and retrieval defaults."""
 
 from pathlib import Path
 
@@ -35,6 +32,7 @@ CHUNK_OVERLAP_DEFAULT = 40
 
 
 LOCAL_EMBEDDING_MODEL_PATH = str(BASE_DIR / "models" / "bge-m3")
+LOCAL_RERANK_MODEL_PATH = str(BASE_DIR / "models" / "bge-reranker-v2-m3")
 SEMANTIC_SPLITTER_MODEL_NAME = "BAAI/bge-m3"
 SEMANTIC_SPLITTER_THRESHOLD = 0.85
 SEMANTIC_SPLITTER_SEPARATORS = ["\n\n", "\n", "。", "？", "！", "；", "?", "!", ";", "..."]

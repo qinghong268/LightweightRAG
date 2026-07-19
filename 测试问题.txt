@@ -1,0 +1,43 @@
+﻿知识库内容测试
+
+问题：什么是 RAG？
+参考答案：RAG 是“检索增强生成”，先从外部知识库检索相关内容，再把检索到的上下文交给大模型生成答案，而不是只靠模型参数记忆。
+
+问题：LangChain 文档里提到的 2-step RAG 有什么特点？
+参考答案：2-step RAG 的特点是每次查询通常只需要一次大模型调用，流程更快、更高效，适合相对简单的问答场景。
+
+问题：什么是 Agentic RAG？
+参考答案：Agentic RAG 是把 RAG 和智能体推理结合起来，由智能体按步骤决定何时检索、检索什么、是否调用工具，而不是固定先检索再回答。
+
+问题：LlamaIndex 里“上下文增强（context augmentation）”的核心目标是什么？
+参考答案：核心目标是在推理时把任务相关的数据提供给大模型，让模型基于外部数据回答问题，而不是把全部数据塞进训练参数里。
+
+问题：LlamaIndex 对“Agent”和“Workflow”的关系是怎么描述的？
+参考答案：Agent 是可用工具和记忆完成任务的执行体；Workflow 是事件驱动的多步骤编排结构，可以把一个或多个 Agent、数据连接器和工具组织成完整流程。
+
+问题：LlamaIndex 中 Query Engine 是干什么的？
+参考答案：Query Engine 是面向问答的端到端接口，输入自然语言问题，输出回答，并附带用于回答的参考上下文。
+
+问题：LlamaIndex 的本地入门示例里，常见的本地模型组合是什么？
+参考答案：示例里常见组合是 Ollama 提供本地 LLM，HuggingFace 提供本地 embedding，然后用 VectorStoreIndex 做检索。
+
+问题：为什么要把索引持久化到磁盘（persist）？
+参考答案：为了避免每次重启都重新解析和向量化文档，持久化后可以直接加载已有索引，启动更快、成本更低。
+
+问题：Qdrant Cloud 快速入门里，示例使用了什么 embedding 模型？
+参考答案：示例使用 sentence-transformers/all-MiniLM-L6-v2，并可通过 Qdrant Cloud Inference 自动完成向量化。
+
+问题：Haystack 文档中，Document Store 的作用是什么？
+参考答案：Document Store 把不同向量数据库抽象为统一接口，便于在 pipeline 里接入 Retriever 做相似度检索。
+
+问题：Haystack 文档中，纯内存 Document Store 适合什么场景？
+参考答案：适合小数据集和快速原型验证，优点是无需额外部署；缺点是非持久化、规模和稳定性有限。
+
+问题：Transformers 文档里为什么推荐用 max_new_tokens？
+参考答案：因为它只控制“新生成”的 token 数，不受输入提示词长度影响，控制输出长度更直观、可预期。
+
+问题：Transformers 里 top-k 和 top-p 分别控制什么？
+参考答案：top-k 限制每步只在最高概率的 k 个 token 中采样；top-p 限制在累计概率达到 p 的最小 token 集合中采样。
+
+问题：在 RAG 里为什么通常还要做重排（rerank）？
+参考答案：首轮向量召回偏“快和广”，重排用更强匹配信号把最相关片段排到前面，降低噪声上下文对最终回答的影响。
